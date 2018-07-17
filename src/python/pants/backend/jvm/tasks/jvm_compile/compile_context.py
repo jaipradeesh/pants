@@ -26,6 +26,8 @@ class CompileContext(object):
     self.log_dir = log_dir
     self.zinc_args_file = zinc_args_file
     self.sources = sources
+    # TODO: This is absolutely the wrong place for this to live
+    self.output_directory_digest = None
 
   @contextmanager
   def open_jar(self, mode):

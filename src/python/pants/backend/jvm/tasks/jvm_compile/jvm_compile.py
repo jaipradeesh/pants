@@ -717,6 +717,10 @@ class JvmCompile(NailgunTaskBase):
 
       # Update the products with the latest classes.
       self.register_extra_products_from_contexts([ctx.target], all_compile_contexts)
+      # TODO: This is so super hacky
+      self._zinc._products.get_data('runtime_classpath').remove_for_target(ctx.target, [('default', ctx.classes_dir, None)])
+      self._zinc._products.get_data('runtime_classpath').add_for_target(ctx.target, [('default', ctx.classes_dir, ctx.output_directory_digest)])
+
 
     context_for_target = all_compile_contexts[compile_target]
     compile_context = self.select_runtime_context(context_for_target)

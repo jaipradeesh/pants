@@ -24,6 +24,7 @@ from pants.backend.jvm.targets.annotation_processor import AnnotationProcessor
 from pants.backend.jvm.targets.javac_plugin import JavacPlugin
 from pants.backend.jvm.targets.jvm_target import JvmTarget
 from pants.backend.jvm.targets.scalac_plugin import ScalacPlugin
+from pants.backend.jvm.tasks.classpath_products import ClasspathEntry
 from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
 from pants.backend.jvm.tasks.jvm_compile.jvm_compile import JvmCompile
 from pants.base.build_environment import get_buildroot
@@ -284,7 +285,7 @@ class BaseZincCompile(JvmCompile):
               settings, compiler_option_sets, zinc_file_manager,
               javac_plugin_map, scalac_plugin_map):
     # TODO: Allow use of absolute classpath entries with hermetic execution, specifically by putting in $JAVA_HOME placeholders
-    self._verify_zinc_classpath(ce.path2 for ce in classpath, allow_dist=(self.execution_strategy == self.HERMETIC))
+    self._verify_zinc_classpath((ce.path2 for ce in classpath), allow_dist=(self.execution_strategy == self.HERMETIC))
     # TODO: Investigate upstream_analysis for hermetic compiles
     self._verify_zinc_classpath(upstream_analysis.keys())
 
@@ -300,7 +301,7 @@ class BaseZincCompile(JvmCompile):
 
     if self.execution_strategy == self.HERMETIC:
       # TODO: Have these produced correctly, rather than having to relativize them here
-      classpath = tuple(relative_to_exec_root(c) for c in classpath)
+      classpath = tuple(ClasspathEntry(relative_to_exec_root(ce.path2), ce.directory_digest) for ce in classpath)
       scala_path = tuple(relative_to_exec_root(c) for c in scala_path)
       compiler_interface = relative_to_exec_root(compiler_interface)
       compiler_bridge = relative_to_exec_root(compiler_bridge)
@@ -402,12 +403,16 @@ class BaseZincCompile(JvmCompile):
       )
       zinc_snapshot = self.context._scheduler.capture_snapshots((root,))[0]
 
-      merged_input_digest = self.context._scheduler.merge_directories(tuple(
-        s.directory_digest for s in (ctx.target.sources_snapshot(self.context._scheduler), zinc_snapshot)
-      ))
+      print("DWH: classpath: {}".format(classpath))
+
+      merged_input_digest = self.context._scheduler.merge_directories(
+        tuple(s.directory_digest for s in (ctx.target.sources_snapshot(self.context._scheduler), zinc_snapshot)) +
+        tuple(ce.directory_digest for ce in classpath if ce.directory_digest)
+      )
 
       # TODO: Write wrapper script to locate the dist remotely, rather than hard-coding the path
-      java = self._zinc.dist.java
+      #java = self._zinc.dist.java
+      java = '/usr/lib/jvm/java-1.8.0-twitter/bin/java'
       # TODO: Extract something common from Executor._create_command
       args = tuple([java] + jvm_options + ['-cp', zinc_relpath, Zinc.ZINC_COMPILE_MAIN] + zinc_args)
       # TODO: Use a constructor which sets a default for the timeout
@@ -425,6 +430,8 @@ class BaseZincCompile(JvmCompile):
       print("DWH: req: {}".format(req))
       # TODO: Maybe delete old files?
       res = self.context.execute_process_synchronously(req, self.name(), [WorkUnitLabel.COMPILER])
+      # TODO: Maybe separate digest out into compile outputs vs analysis, as deps shouldn't need analysis?
+      ctx.output_directory_digest = res.output_directory_digest
       print("DWH: res: {}".format(res))
       self.context._scheduler.materialize_directories((DirectoryToMaterialize(text_type(get_buildroot()), res.output_directory_digest),))
     else:
