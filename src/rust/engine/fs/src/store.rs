@@ -410,10 +410,7 @@ impl Store {
     destination: PathBuf,
     digest: Digest,
   ) -> BoxFuture<(), String> {
-    match super::safe_create_dir_all(&destination) {
-      Ok(()) => {}
-      Err(e) => return future::err(e).to_boxed(),
-    };
+    try_future!(super::safe_create_dir_all(&destination));
     let store = self.clone();
     self
       .load_directory(digest)
@@ -1612,7 +1609,8 @@ mod remote {
                 } else {
                   let mut req = bazel_protos::bytestream::WriteRequest::new();
                   req.set_resource_name(resource_name.clone());
-                  req.set_write_offset(offset as i64);
+                  // TODO: Change this back to offset when scoot supports this.
+                  req.set_write_offset(0 as i64);
                   let next_offset = min(offset + chunk_size_bytes, bytes.len());
                   req.set_finish_write(next_offset == bytes.len());
                   req.set_data(bytes.slice(offset, next_offset));

@@ -148,6 +148,7 @@ class Zinc(object):
     """
     return self._zinc_factory._compiler_interface(self._products)
 
+  # TODO: Relativise (and sort)
   @memoized_property
   def rebase_map_args(self):
     """We rebase known stable paths in zinc analysis to make it portable across machines."""

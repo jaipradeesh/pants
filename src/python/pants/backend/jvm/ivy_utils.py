@@ -4,11 +4,11 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import errno
 import json
 import logging
 import os
 import pkgutil
+import shutil
 import threading
 import xml.etree.ElementTree as ET
 from abc import abstractmethod
@@ -851,18 +851,22 @@ class IvyUtils(object):
         # This path is outside the cache. We won't symlink it.
         symlink_map[path] = path
 
+    # TODO: Work out whether this should be hacked by:
+    #  1. Using hardlinks here where possible, and copying where not.
+    #     (as vaguely below).
+    #  2. Snapshotting the symlink target, and wrapping it up in more directory prefixes
+    #  3. A "Flatten symlinks" capture mode for one-off captures.
     # Create symlinks for paths in the ivy cache dir.
-    for path, symlink in six.iteritems(symlink_map):
-      if path == symlink:
+    for path, link in six.iteritems(symlink_map):
+      if path == link:
         # Skip paths that aren't going to be symlinked.
         continue
-      safe_mkdir(os.path.dirname(symlink))
-      try:
-        os.symlink(path, symlink)
-      except OSError as e:
-        # We don't delete and recreate the symlink, as this may break concurrently executing code.
-        if e.errno != errno.EEXIST:
-          raise
+      safe_mkdir(os.path.dirname(link))
+      if not os.path.exists(link):
+        try:
+          os.link(path, link)
+        except:
+          shutil.copyfile(path, link)
 
     # (re)create the classpath with all of the paths
     with safe_open(outpath, 'w') as outfile:

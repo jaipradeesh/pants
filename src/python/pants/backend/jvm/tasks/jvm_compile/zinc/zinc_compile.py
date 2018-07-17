@@ -14,6 +14,8 @@ from contextlib import closing
 from hashlib import sha1
 from xml.etree import ElementTree
 
+from six import text_type
+
 from pants.backend.jvm.subsystems.java import Java
 from pants.backend.jvm.subsystems.jvm_platform import JvmPlatform
 from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
@@ -28,9 +30,11 @@ from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
 from pants.base.hash_utils import hash_file
 from pants.base.workunit import WorkUnitLabel
+from pants.engine.fs import DirectoryToMaterialize, PathGlobs, PathGlobsAndRoot
+from pants.engine.isolated_process import ExecuteProcessRequest
 from pants.java.distribution.distribution import DistributionLocator
 from pants.util.contextutil import open_zip
-from pants.util.dirutil import safe_open
+from pants.util.dirutil import fast_relpath, safe_open
 from pants.util.memo import memoized_method, memoized_property
 
 
@@ -203,6 +207,10 @@ class BaseZincCompile(JvmCompile):
     # Validate zinc options.
     ZincCompile.validate_arguments(self.context.log, self.get_options().whitelisted_args,
                                    self._args)
+    if self.execution_strategy == self.HERMETIC and (
+      fast_relpath(self.get_options().pants_workdir, get_buildroot()).startswith('..')
+    ):
+      raise Exception("TODO: Support workdirs not under buildroot")
 
   def select(self, target):
     raise NotImplementedError()
@@ -275,24 +283,47 @@ class BaseZincCompile(JvmCompile):
   def compile(self, ctx, args, classpath, upstream_analysis,
               settings, compiler_option_sets, zinc_file_manager,
               javac_plugin_map, scalac_plugin_map):
-    self._verify_zinc_classpath(ce.path2 for ce in classpath)
+    # TODO: Allow use of absolute classpath entries with hermetic execution, specifically by putting in $JAVA_HOME placeholders
+    self._verify_zinc_classpath(ce.path2 for ce in classpath, allow_dist=(self.execution_strategy == self.HERMETIC))
+    # TODO: Investigate upstream_analysis for hermetic compiles
     self._verify_zinc_classpath(upstream_analysis.keys())
+
+    def relative_to_exec_root(path):
+      # TODO: Support workdirs not nested under buildroot by path-rewriting.
+      return fast_relpath(path, get_buildroot())
+
+    scala_path = self.scalac_classpath()
+    compiler_interface = self._zinc.compiler_interface
+    compiler_bridge = self._zinc.compiler_bridge
+    classes_dir = ctx.classes_dir
+    analysis_cache = ctx.analysis_file
+
+    if self.execution_strategy == self.HERMETIC:
+      # TODO: Have these produced correctly, rather than having to relativize them here
+      classpath = tuple(relative_to_exec_root(c) for c in classpath)
+      scala_path = tuple(relative_to_exec_root(c) for c in scala_path)
+      compiler_interface = relative_to_exec_root(compiler_interface)
+      compiler_bridge = relative_to_exec_root(compiler_bridge)
+      analysis_cache = relative_to_exec_root(analysis_cache)
+      classes_dir = relative_to_exec_root(classes_dir)
 
     zinc_args = []
 
     zinc_args.extend([
       '-log-level', self.get_options().level,
-      '-analysis-cache', ctx.analysis_file,
+      '-analysis-cache', analysis_cache,
       '-classpath', ':'.join(ce.path2 for ce in classpath),
-      '-d', ctx.classes_dir
+      '-d', classes_dir,
     ])
     if not self.get_options().colors:
       zinc_args.append('-no-color')
 
-    zinc_args.extend(['-compiler-interface', self._zinc.compiler_interface])
-    zinc_args.extend(['-compiler-bridge', self._zinc.compiler_bridge])
-    zinc_args.extend(['-zinc-cache-dir', self._zinc_cache_dir])
-    zinc_args.extend(['-scala-path', ':'.join(self.scalac_classpath())])
+    zinc_args.extend(['-compiler-interface', compiler_interface])
+    zinc_args.extend(['-compiler-bridge', compiler_bridge])
+    # TODO: Kill zinc-cache-dir: https://github.com/pantsbuild/pants/issues/6155
+    #zinc_args.extend(['-zinc-cache-dir', self._zinc_cache_dir])
+    zinc_args.extend(['-zinc-cache-dir', '/tmp'])
+    zinc_args.extend(['-scala-path', ':'.join(scala_path)])
 
     zinc_args.extend(self._javac_plugin_args(javac_plugin_map))
     # Search for scalac plugins on the classpath.
@@ -311,7 +342,10 @@ class BaseZincCompile(JvmCompile):
     zinc_args.extend(self._scalac_plugin_args(scalac_plugin_map, scalac_plugin_search_classpath))
     if upstream_analysis:
       zinc_args.extend(['-analysis-map',
-                        ','.join('{}:{}'.format(*kv) for kv in upstream_analysis.items())])
+                        ','.join('{}:{}'.format(
+                          relative_to_exec_root(k),
+                          relative_to_exec_root(v)
+                        ) for k, v in upstream_analysis.items())])
 
     zinc_args.extend(self._zinc.rebase_map_args)
 
@@ -359,16 +393,51 @@ class BaseZincCompile(JvmCompile):
         fp.write(arg)
         fp.write(b'\n')
 
-    if self.runjava(classpath=[self._zinc.zinc],
-                    main=Zinc.ZINC_COMPILE_MAIN,
-                    jvm_options=jvm_options,
-                    args=zinc_args,
-                    workunit_name=self.name(),
-                    workunit_labels=[WorkUnitLabel.COMPILER],
-                    dist=self._zinc.dist):
-      raise TaskError('Zinc compile failed.')
+    if self.execution_strategy == self.HERMETIC:
+      # TODO: Move these to be captured-once products on Zinc as part of bootstrap
+      zinc_relpath = fast_relpath(self._zinc.zinc, get_buildroot())
+      root = PathGlobsAndRoot(
+        PathGlobs((zinc_relpath, compiler_bridge, compiler_interface) + scala_path),
+        text_type(get_buildroot()),
+      )
+      zinc_snapshot = self.context._scheduler.capture_snapshots((root,))[0]
 
-  def _verify_zinc_classpath(self, classpath):
+      merged_input_digest = self.context._scheduler.merge_directories(tuple(
+        s.directory_digest for s in (ctx.target.sources_snapshot(self.context._scheduler), zinc_snapshot)
+      ))
+
+      # TODO: Write wrapper script to locate the dist remotely, rather than hard-coding the path
+      java = self._zinc.dist.java
+      # TODO: Extract something common from Executor._create_command
+      args = tuple([java] + jvm_options + ['-cp', zinc_relpath, Zinc.ZINC_COMPILE_MAIN] + zinc_args)
+      # TODO: Use a constructor which sets a default for the timeout
+      req = ExecuteProcessRequest(
+        args,
+        # TODO: https://github.com/pantsbuild/pants/issues/6160
+        ('PATH', '/bin'),
+        merged_input_digest,
+        (analysis_cache,),
+        # TODO: This isn't actually captured remotely because https://github.com/pantsbuild/pants/issues/5995
+        (classes_dir,),
+        15 * 60,
+        "zinc compile for {}".format(ctx.target.address.spec),
+      )
+      print("DWH: req: {}".format(req))
+      # TODO: Maybe delete old files?
+      res = self.context.execute_process_synchronously(req, self.name(), [WorkUnitLabel.COMPILER])
+      print("DWH: res: {}".format(res))
+      self.context._scheduler.materialize_directories((DirectoryToMaterialize(text_type(get_buildroot()), res.output_directory_digest),))
+    else:
+      if self.runjava(classpath=[self._zinc.zinc],
+                      main=Zinc.ZINC_COMPILE_MAIN,
+                      jvm_options=jvm_options,
+                      args=zinc_args,
+                      workunit_name=self.name(),
+                      workunit_labels=[WorkUnitLabel.COMPILER],
+                      dist=self._zinc.dist):
+        raise TaskError('Zinc compile failed.')
+
+  def _verify_zinc_classpath(self, classpath, allow_dist=True):
     def is_outside(path, putative_parent):
       return os.path.relpath(path, putative_parent).startswith(os.pardir)
 
@@ -378,7 +447,7 @@ class BaseZincCompile(JvmCompile):
         raise TaskError('Classpath entries provided to zinc should be absolute. '
                         '{} is not.'.format(path))
 
-      if is_outside(path, self.get_options().pants_workdir) and is_outside(path, dist.home):
+      if is_outside(path, self.get_options().pants_workdir) and (not allow_dist or is_outside(path, dist.home)):
         raise TaskError('Classpath entries provided to zinc should be in working directory or '
                         'part of the JDK. {} is not.'.format(path))
       if path != os.path.normpath(path):
