@@ -39,6 +39,7 @@ members = [
   "resettable",
   "testutil",
   "testutil/mock",
+  "tower_cas",
   "ui"
 ]
 

@@ -1,0 +1,20 @@
+[package]
+name = "tower_cas"
+version = "0.1.0"
+authors = ["Daniel Wagner-Hall <dwagnerhall@twitter.com>"]
+
+[dependencies]
+bytes = "0.4"
+env_logger = { version = "0.5" }
+futures = "0.1"
+http = "0.1"
+prost = "0.4"
+prost-derive = "0.4"
+prost-types = "0.4"
+tokio-core = "0.1"
+tower-grpc = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-grpc", features = ["prost"] }
+tower-http = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-http" }
+tower-h2 = { git = "https://github.com/tower-rs/tower-h2" }
+
+[build-dependencies]
+tower-grpc-build = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-grpc/tower-grpc-build" }
