@@ -1,23 +1,34 @@
+use bazel_protos::build::bazel::remote::execution::v2::server::{Execution, ExecutionServer};
+use bazel_protos::build::bazel::remote::execution::v2::{ExecuteRequest, WaitExecutionRequest};
+use bazel_protos::google::longrunning::server::Operations;
+use bazel_protos::google::longrunning::Operation;
+use bazel_protos::google::longrunning::{
+  CancelOperationRequest, DeleteOperationRequest, GetOperationRequest, ListOperationsRequest,
+  ListOperationsResponse,
+};
+use bazel_protos::google::protobuf::Empty;
+
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::iter::FromIterator;
+use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 
-use bazel_protos;
-use futures::{Future, Sink};
-use grpcio;
-use protobuf;
+use super::StopOnDropServer;
+use futures;
+use http;
+use prost;
+use tower_grpc;
 
 #[derive(Clone, Debug)]
 pub struct MockExecution {
   name: String,
-  execute_request: bazel_protos::remote_execution::ExecuteRequest,
-  operation_responses:
-    Arc<Mutex<VecDeque<(bazel_protos::operations::Operation, Option<Duration>)>>>,
+  execute_request: ExecuteRequest,
+  operation_responses: Arc<Mutex<VecDeque<(Operation, Option<Duration>)>>>,
 }
 
 impl MockExecution {
@@ -31,8 +42,8 @@ impl MockExecution {
   ///
   pub fn new(
     name: String,
-    execute_request: bazel_protos::remote_execution::ExecuteRequest,
-    operation_responses: Vec<(bazel_protos::operations::Operation, Option<Duration>)>,
+    execute_request: ExecuteRequest,
+    operation_responses: Vec<(Operation, Option<Duration>)>,
   ) -> MockExecution {
     MockExecution {
       name: name,
@@ -48,7 +59,7 @@ impl MockExecution {
 ///
 pub struct TestServer {
   pub mock_responder: MockResponder,
-  server_transport: grpcio::Server,
+  server_transport: StopOnDropServer,
 }
 
 impl TestServer {
@@ -65,21 +76,12 @@ impl TestServer {
   pub fn new(mock_execution: MockExecution) -> TestServer {
     let mock_responder = MockResponder::new(mock_execution);
 
-    let env = Arc::new(grpcio::Environment::new(1));
-    let mut server_transport = grpcio::ServerBuilder::new(env)
-      .register_service(bazel_protos::remote_execution_grpc::create_execution(
-        mock_responder.clone(),
-      ))
-      .register_service(bazel_protos::operations_grpc::create_operations(
-        mock_responder.clone(),
-      ))
-      .bind("localhost", 0)
-      .build()
-      .unwrap();
-    server_transport.start();
+    // TODO: Also register Operations...
+    let new_service = ExecutionServer::new(mock_responder.clone());
+    let server_transport = StopOnDropServer::new(new_service).expect("Starting");
 
     TestServer {
-      mock_responder: mock_responder,
+      mock_responder,
       server_transport,
     }
   }
@@ -87,9 +89,8 @@ impl TestServer {
   ///
   /// The address on which this server is listening over insecure HTTP transport.
   ///
-  pub fn address(&self) -> String {
-    let bind_addr = self.server_transport.bind_addrs().first().unwrap();
-    format!("{}:{}", bind_addr.0, bind_addr.1)
+  pub fn address(&self) -> SocketAddr {
+    self.server_transport.local_addr()
   }
 }
 
@@ -129,7 +130,7 @@ impl Drop for TestServer {
 #[derive(Clone, Debug)]
 pub struct MockResponder {
   mock_execution: MockExecution,
-  pub received_messages: Arc<Mutex<Vec<(String, Box<protobuf::Message>, Instant)>>>,
+  pub received_messages: Arc<Mutex<Vec<(String, Box<prost::Message>, Instant)>>>,
 }
 
 impl MockResponder {
@@ -140,12 +141,12 @@ impl MockResponder {
     }
   }
 
-  fn log<T: protobuf::Message + Sized>(&self, message: T) {
-    self.received_messages.lock().unwrap().push((
-      message.descriptor().name().to_string(),
-      Box::new(message),
-      Instant::now(),
-    ));
+  fn log<T: prost::Message + Sized + 'static>(&self, request_type: String, message: Box<T>) {
+    self
+      .received_messages
+      .lock()
+      .unwrap()
+      .push((request_type, message, Instant::now()));
   }
 
   fn display_all<D: Debug>(items: &[D]) -> String {
@@ -156,10 +157,7 @@ impl MockResponder {
       .concat()
   }
 
-  fn send_next_operation_unary(
-    &self,
-    sink: grpcio::UnarySink<super::bazel_protos::operations::Operation>,
-  ) {
+  fn next_operation(&self) -> Result<Operation, tower_grpc::Error> {
     match self
       .mock_execution
       .operation_responses
@@ -171,135 +169,111 @@ impl MockResponder {
         if let Some(d) = duration {
           sleep(d);
         }
-        sink.success(op.clone());
+        Ok(op.clone())
       }
       None => {
-        sink.fail(grpcio::RpcStatus::new(
-          grpcio::RpcStatusCode::InvalidArgument,
-          Some("Did not expect further requests from client.".to_string()),
-        ));
+        // TODO: Error message
+        Err(tower_grpc::Error::Grpc(
+          tower_grpc::Status::INVALID_ARGUMENT,
+          http::HeaderMap::new(),
+        ))
+        //        sink.fail(grpcio::RpcStatus::new(
+        //          grpcio::RpcStatusCode::InvalidArgument,
+        //          Some("Did not expect further requests from client.".to_string()),
+        //        ));
       }
-    }
-  }
-
-  fn send_next_operation_stream(
-    &self,
-    ctx: grpcio::RpcContext,
-    sink: grpcio::ServerStreamingSink<super::bazel_protos::operations::Operation>,
-  ) {
-    match self
-      .mock_execution
-      .operation_responses
-      .lock()
-      .unwrap()
-      .pop_front()
-    {
-      Some((op, duration)) => {
-        if let Some(d) = duration {
-          sleep(d);
-        }
-        ctx.spawn(
-          sink
-            .send((op.clone(), grpcio::WriteFlags::default()))
-            .map(|mut stream| stream.close())
-            .map(|_| ())
-            .map_err(|_| ()),
-        )
-      }
-      None => ctx.spawn(
-        sink
-          .fail(grpcio::RpcStatus::new(
-            grpcio::RpcStatusCode::InvalidArgument,
-            Some("Did not expect further requests from client.".to_string()),
-          ))
-          .map(|_| ())
-          .map_err(|_| ()),
-      ),
     }
   }
 }
 
-impl bazel_protos::remote_execution_grpc::Execution for MockResponder {
+impl Execution for MockResponder {
+  type ExecuteStream = futures::stream::Once<Operation, tower_grpc::Error>;
+  type ExecuteFuture =
+    futures::future::FutureResult<tower_grpc::Response<Self::ExecuteStream>, tower_grpc::Error>;
+  type WaitExecutionStream = futures::stream::Once<Operation, tower_grpc::Error>;
+  type WaitExecutionFuture =
+    futures::future::FutureResult<tower_grpc::Response<Self::ExecuteStream>, tower_grpc::Error>;
+
   // We currently only support the one-shot "stream and disconnect" client behavior.
   // If we start supporting the "stream updates" variant, we will need to do so here.
-  fn execute(
-    &self,
-    ctx: grpcio::RpcContext,
-    req: bazel_protos::remote_execution::ExecuteRequest,
-    sink: grpcio::ServerStreamingSink<bazel_protos::operations::Operation>,
-  ) {
-    self.log(req.clone());
+  fn execute(&mut self, req: tower_grpc::Request<ExecuteRequest>) -> Self::ExecuteFuture {
+    self.log(
+      "Execution.execute".to_owned(),
+      Box::new(req.get_ref().clone()),
+    );
 
-    if self.mock_execution.execute_request != req {
-      ctx.spawn(
-        sink
-          .fail(grpcio::RpcStatus::new(
-            grpcio::RpcStatusCode::InvalidArgument,
-            Some("Did not expect this request".to_string()),
-          ))
-          .map_err(|_| ()),
-      );
-      return;
+    if &self.mock_execution.execute_request != req.get_ref() {
+      // TODO: Error message
+      return futures::future::err(tower_grpc::Error::Grpc(
+        tower_grpc::Status::INVALID_ARGUMENT,
+        http::HeaderMap::new(),
+      ));
+      //      ctx.spawn(
+      //        sink
+      //          .fail(grpcio::RpcStatus::new(
+      //            grpcio::RpcStatusCode::InvalidArgument,
+      //            Some("Did not expect this request".to_string()),
+      //          ))
+      //          .map_err(|_| ()),
+      //      );
+      //      return;
     }
 
-    self.send_next_operation_stream(ctx, sink);
+    futures::future::done(
+      self
+        .next_operation()
+        .map(|operation| tower_grpc::Response::new(futures::stream::once(Ok(operation)))),
+    )
   }
 
   fn wait_execution(
-    &self,
-    _ctx: grpcio::RpcContext,
-    _req: bazel_protos::remote_execution::WaitExecutionRequest,
-    _sink: grpcio::ServerStreamingSink<bazel_protos::operations::Operation>,
-  ) {
+    &mut self,
+    request: tower_grpc::Request<WaitExecutionRequest>,
+  ) -> Self::WaitExecutionFuture {
     unimplemented!()
   }
 }
 
-impl bazel_protos::operations_grpc::Operations for MockResponder {
-  fn get_operation(
-    &self,
-    _: grpcio::RpcContext,
-    req: bazel_protos::operations::GetOperationRequest,
-    sink: grpcio::UnarySink<bazel_protos::operations::Operation>,
-  ) {
-    self.log(req.clone());
+impl Operations for MockResponder {
+  type ListOperationsFuture =
+    futures::future::FutureResult<tower_grpc::Response<ListOperationsResponse>, tower_grpc::Error>;
+  type GetOperationFuture =
+    futures::future::FutureResult<tower_grpc::Response<Operation>, tower_grpc::Error>;
+  type DeleteOperationFuture =
+    futures::future::FutureResult<tower_grpc::Response<Empty>, tower_grpc::Error>;
+  type CancelOperationFuture =
+    futures::future::FutureResult<tower_grpc::Response<Empty>, tower_grpc::Error>;
 
-    self.send_next_operation_unary(sink)
+  fn get_operation(
+    &mut self,
+    req: tower_grpc::Request<GetOperationRequest>,
+  ) -> Self::GetOperationFuture {
+    self.log(
+      "Operations.get_operation".to_owned(),
+      Box::new(req.get_ref().clone()),
+    );
+
+    futures::future::done(self.next_operation().map(tower_grpc::Response::new))
   }
 
   fn list_operations(
-    &self,
-    _: grpcio::RpcContext,
-    _: bazel_protos::operations::ListOperationsRequest,
-    sink: grpcio::UnarySink<bazel_protos::operations::ListOperationsResponse>,
-  ) {
-    sink.fail(grpcio::RpcStatus::new(
-      grpcio::RpcStatusCode::Unimplemented,
-      None,
-    ));
+    &mut self,
+    request: tower_grpc::Request<ListOperationsRequest>,
+  ) -> Self::ListOperationsFuture {
+    unimplemented!()
   }
 
   fn delete_operation(
-    &self,
-    _: grpcio::RpcContext,
-    _: bazel_protos::operations::DeleteOperationRequest,
-    sink: grpcio::UnarySink<bazel_protos::empty::Empty>,
-  ) {
-    sink.fail(grpcio::RpcStatus::new(
-      grpcio::RpcStatusCode::Unimplemented,
-      None,
-    ));
+    &mut self,
+    request: tower_grpc::Request<DeleteOperationRequest>,
+  ) -> Self::DeleteOperationFuture {
+    unimplemented!()
   }
 
   fn cancel_operation(
-    &self,
-    _: grpcio::RpcContext,
-    _: bazel_protos::operations::CancelOperationRequest,
-    sink: grpcio::UnarySink<bazel_protos::empty::Empty>,
-  ) {
-    sink.fail(grpcio::RpcStatus::new(
-      grpcio::RpcStatusCode::Unimplemented,
-      None,
-    ));
+    &mut self,
+    request: tower_grpc::Request<CancelOperationRequest>,
+  ) -> Self::CancelOperationFuture {
+    unimplemented!()
   }
 }

@@ -1,5 +1,5 @@
-use hashing;
 use build::bazel::remote::execution::v2 as remote_execution;
+use hashing;
 
 impl<'a> From<&'a hashing::Digest> for remote_execution::Digest {
   fn from(d: &hashing::Digest) -> Self {

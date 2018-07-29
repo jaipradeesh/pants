@@ -6,9 +6,16 @@ publish = false
 
 [dependencies]
 bazel_protos = { path = "../../process_execution/bazel_protos" }
+boxfuture = { path = "../../boxfuture" }
 bytes = "0.4.5"
 futures = "^0.1.16"
-grpcio = { version = "0.2.0", features = ["secure"] }
+futures-timer = "0.1"
+h2 = "0.1.10"
 hashing = { path = "../../hashing" }
-protobuf = { version = "1.4.1", features = ["with-bytes"] }
+http = "0.1"
+log = "0.4"
+prost = "0.4"
 testutil = { path = ".." }
+tokio-core = "0.1"
+tower-grpc = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-grpc", features = ["prost"] }
+tower-h2 = { git = "https://github.com/tower-rs/tower-h2" }

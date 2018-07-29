@@ -1,8 +1,8 @@
 extern crate tower_grpc_build;
 
 fn main() {
-    // TODO: Set up directory watches
-    tower_grpc_build::Config::new()
+  // TODO: Set up directory watches
+  tower_grpc_build::Config::new()
         .enable_server(true)
         .enable_client(true)
         .build(
@@ -16,4 +16,3 @@ fn main() {
         )
         .unwrap_or_else(|e| panic!("protobuf compilation failed: {}", e));
 }
-

@@ -1,124 +1,21 @@
-extern crate env_logger;
-extern crate futures;
-extern crate futures_timer;
-extern crate h2;
-extern crate http;
-extern crate prost;
-#[macro_use]
-extern crate prost_derive;
-extern crate prost_types;
-extern crate tokio_core;
-extern crate tower_grpc;
-extern crate tower_h2;
-extern crate tower_http;
-
-use futures::{stream::poll_fn, Async, Future, Poll, Stream};
+use futures::{self, stream::poll_fn, Async, Future, Poll, Stream};
+use futures_timer;
+use h2;
+use http;
+use std;
+use std::fmt::Debug;
+use std::net::SocketAddr;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
-use tokio_core::net::{TcpListener, TcpStream};
+use tokio_core;
+use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
 use tower_grpc::codegen::server::tower::NewService;
-use tower_grpc::{Request, Response};
-use tower_h2::Body;
-use tower_h2::RecvBody;
-use tower_h2::{client::Connection, Server};
+use tower_h2::{Body, RecvBody, Server};
 
-pub mod build {
-  pub mod bazel {
-    pub mod remote {
-      pub mod execution {
-        pub mod v2 {
-          include!(concat!(
-            env!("OUT_DIR"),
-            "/build.bazel.remote.execution.v2.rs"
-          ));
-        }
-      }
-    }
-  }
-}
-
-pub mod google {
-  pub mod api {
-    include!(concat!(env!("OUT_DIR"), "/google.api.rs"));
-  }
-
-  pub mod longrunning {
-    include!(concat!(env!("OUT_DIR"), "/google.longrunning.rs"));
-  }
-
-  pub mod rpc {
-    include!(concat!(env!("OUT_DIR"), "/google.rpc.rs"));
-  }
-
-  pub mod protobuf {
-    include!(concat!(env!("OUT_DIR"), "/google.protobuf.rs"));
-
-    pub type Empty = ();
-  }
-}
-
-#[derive(Clone)]
-struct CAS;
-
-impl build::bazel::remote::execution::v2::server::ContentAddressableStorage for CAS {
-  type FindMissingBlobsFuture = futures::future::FutureResult<
-    tower_grpc::Response<build::bazel::remote::execution::v2::FindMissingBlobsResponse>,
-    tower_grpc::Error,
-  >;
-  type BatchUpdateBlobsFuture = futures::future::FutureResult<
-    tower_grpc::Response<build::bazel::remote::execution::v2::BatchUpdateBlobsResponse>,
-    tower_grpc::Error,
-  >;
-  type GetTreeStream = futures::stream::IterOk<
-    std::vec::IntoIter<build::bazel::remote::execution::v2::GetTreeResponse>,
-    tower_grpc::Error,
-  >;
-  type GetTreeFuture =
-    futures::future::FutureResult<tower_grpc::Response<Self::GetTreeStream>, tower_grpc::Error>;
-
-  fn find_missing_blobs(
-    &mut self,
-    request: tower_grpc::Request<build::bazel::remote::execution::v2::FindMissingBlobsRequest>,
-  ) -> Self::FindMissingBlobsFuture {
-    println!("DWH: Got find missing blobs");
-    futures::future::ok(Response::new(
-      build::bazel::remote::execution::v2::FindMissingBlobsResponse {
-        missing_blob_digests: vec![],
-      },
-    ))
-  }
-
-  fn batch_update_blobs(
-    &mut self,
-    request: tower_grpc::Request<build::bazel::remote::execution::v2::BatchUpdateBlobsRequest>,
-  ) -> Self::BatchUpdateBlobsFuture {
-    unimplemented!();
-  }
-
-  fn get_tree(
-    &mut self,
-    request: tower_grpc::Request<build::bazel::remote::execution::v2::GetTreeRequest>,
-  ) -> Self::GetTreeFuture {
-    unimplemented!();
-  }
-}
-
-fn main() {
-  let cas = CAS;
-  let new_service =
-    build::bazel::remote::execution::v2::server::ContentAddressableStorageServer::new(cas);
-  {
-    let server = StopOnDropServer::new(new_service).expect("Starting");
-    println!("DWH: Server started ({:?}); sleeping", server.local_addr());
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    println!("DWH: Done sleeping");
-  }
-}
-
-struct StopOnDropServer {
+pub struct StopOnDropServer {
   dropped: Arc<Mutex<bool>>,
-  local_addr: std::net::SocketAddr,
+  local_addr: SocketAddr,
 }
 
 impl StopOnDropServer {
@@ -133,8 +30,8 @@ impl StopOnDropServer {
       + Send
       + 'static,
     B: Body + 'static,
-    IE: std::fmt::Debug,
-    SE: std::fmt::Debug,
+    IE: Debug,
+    SE: Debug,
   {
     let stop = Arc::new(Mutex::new(false));
     let stop2 = stop.clone();
@@ -151,13 +48,15 @@ impl StopOnDropServer {
       })();
       let (mut core, listener) = match result {
         Ok((core, listener, addr)) => {
-          sender.send(Ok(addr));
+          sender
+            .send(Ok(addr))
+            .expect("Error sending Ok from started server thread");
           (core, listener)
         }
         Err(err) => {
           sender
             .send(Err(err))
-            .expect("Error sending from started server thread");
+            .expect("Error sending Err from started server thread");
           return;
         }
       };
@@ -230,7 +129,7 @@ impl StopOnDropServer {
     }
   }
 
-  pub fn local_addr(&self) -> std::net::SocketAddr {
+  pub fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 }

@@ -1,7 +1,7 @@
 // Copyright 2017 Pants project contributors (see CONTRIBUTORS.md).
 // Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-use bazel_protos;
+use bazel_protos::build::bazel::remote::execution::v2::{Directory, DirectoryNode, FileNode};
 use boxfuture::{BoxFuture, Boxable};
 use futures::future::{self, join_all};
 use futures::Future;
@@ -71,10 +71,8 @@ impl Snapshot {
     file_digester: &S,
     path_stats: &[PathStat],
   ) -> BoxFuture<Digest, String> {
-    let mut file_futures: Vec<BoxFuture<bazel_protos::remote_execution::FileNode, String>> =
-      Vec::new();
-    let mut dir_futures: Vec<BoxFuture<bazel_protos::remote_execution::DirectoryNode, String>> =
-      Vec::new();
+    let mut file_futures: Vec<BoxFuture<FileNode, String>> = Vec::new();
+    let mut dir_futures: Vec<BoxFuture<DirectoryNode, String>> = Vec::new();
 
     for (first_component, group) in &path_stats
       .iter()
@@ -98,7 +96,7 @@ impl Snapshot {
                 .store_by_digest(stat.clone())
                 .map_err(|e| format!("{:?}", e))
                 .and_then(move |digest| {
-                  let mut file_node = bazel_protos::remote_execution::FileNode::new();
+                  let mut file_node = FileNode::new();
                   file_node.set_name(osstring_as_utf8(first_component)?);
                   file_node.set_digest((&digest).into());
                   file_node.set_is_executable(is_executable);
@@ -111,9 +109,9 @@ impl Snapshot {
             // Because there are no children of this Dir, it must be empty.
             dir_futures.push(
               store
-                .record_directory(&bazel_protos::remote_execution::Directory::new(), true)
+                .record_directory(&Directory::new(), true)
                 .map(move |digest| {
-                  let mut directory_node = bazel_protos::remote_execution::DirectoryNode::new();
+                  let mut directory_node = DirectoryNode::new();
                   directory_node.set_name(osstring_as_utf8(first_component).unwrap());
                   directory_node.set_digest((&digest).into());
                   directory_node
@@ -130,7 +128,7 @@ impl Snapshot {
             file_digester,
             &paths_of_child_dir(path_group),
           ).and_then(move |digest| {
-            let mut dir_node = bazel_protos::remote_execution::DirectoryNode::new();
+            let mut dir_node = DirectoryNode::new();
             dir_node.set_name(osstring_as_utf8(first_component)?);
             dir_node.set_digest((&digest).into());
             Ok(dir_node)
@@ -142,7 +140,7 @@ impl Snapshot {
     join_all(dir_futures)
       .join(join_all(file_futures))
       .and_then(move |(dirs, files)| {
-        let mut directory = bazel_protos::remote_execution::Directory::new();
+        let mut directory = Directory::new();
         directory.set_directories(protobuf::RepeatedField::from_vec(dirs));
         directory.set_files(protobuf::RepeatedField::from_vec(files));
         store.record_directory(&directory, true)
@@ -215,7 +213,7 @@ impl Snapshot {
       .collect::<Vec<_>>();
     join_all(directories)
       .and_then(move |mut directories| {
-        let mut out_dir = bazel_protos::remote_execution::Directory::new();
+        let mut out_dir = Directory::new();
 
         // Merge FileNodes.
         out_dir.set_files(protobuf::RepeatedField::from_vec(
@@ -271,7 +269,7 @@ impl Snapshot {
               future::done(digests_result)
                 .and_then(move |digests| Self::merge_directories(store2.clone(), digests))
                 .map(move |merged_digest| {
-                  let mut child_dir = bazel_protos::remote_execution::DirectoryNode::new();
+                  let mut child_dir = DirectoryNode::new();
                   child_dir.set_name(child_name);
                   child_dir.set_digest((&merged_digest).into());
                   child_dir

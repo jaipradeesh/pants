@@ -16,38 +16,51 @@ fn main() {
 
   // TODO: Set up directory watches
   tower_grpc_build::Config::new()
-      .enable_server(true)
-      .enable_client(true)
-      .build(
-        &[merged.join("build").join("bazel").join("remote").join("execution").join("v2").join("remote_execution.proto")],
-        &[merged],
-      )
-      .expect("Protobuf compilation failed");
+    .enable_server(true)
+    .enable_client(true)
+    .build(
+      &[
+        merged
+          .join("build")
+          .join("bazel")
+          .join("remote")
+          .join("execution")
+          .join("v2")
+          .join("remote_execution.proto"),
+        merged
+          .join("google")
+          .join("bytestream")
+          .join("bytestream.proto"),
+      ],
+      &[merged],
+    )
+    .expect("Protobuf compilation failed");
 
-    for package in &[
-        "build.bazel.remote.execution.v2",
-        "google.api",
-        "google.longrunning",
-        "google.rpc",
-        "google.protobuf",
-    ] {
-        copy_generated_file(package).expect("Copying generated protobuf rust failed");
-    }
+  for package in &[
+    "build.bazel.remote.execution.v2",
+    "google.api",
+    "google.bytestream",
+    "google.longrunning",
+    "google.rpc",
+    "google.protobuf",
+  ] {
+    copy_generated_file(package).expect("Copying generated protobuf rust failed");
+  }
 }
 
 fn copy_generated_file(package_path: &str) -> Result<(), std::io::Error> {
-    let mut generated_filename = String::from(package_path);
-    generated_filename.extend(".rs".chars());
-    let src = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join(generated_filename);
+  let mut generated_filename = String::from(package_path);
+  generated_filename.extend(".rs".chars());
+  let src = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join(generated_filename);
 
-    let mut dst = PathBuf::from("src").join("gen");
-    dst.extend(package_path.split('.'));
-    dst.set_extension("rs");
+  let mut dst = PathBuf::from("src").join("gen");
+  dst.extend(package_path.split('.'));
+  dst.set_extension("rs");
 
-    std::fs::create_dir_all(dst.parent().unwrap())?;
-    println!("DWH: Copying {:?} to {:?}", src, dst);
-    std::fs::copy(src, dst)?;
-    Ok(())
+  std::fs::create_dir_all(dst.parent().unwrap())?;
+  println!("DWH: Copying {:?} to {:?}", src, dst);
+  std::fs::copy(src, dst)?;
+  Ok(())
 }
 
 //fn main() {

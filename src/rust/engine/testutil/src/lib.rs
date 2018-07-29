@@ -2,7 +2,7 @@ extern crate bazel_protos;
 extern crate bytes;
 extern crate digest;
 extern crate hashing;
-extern crate protobuf;
+extern crate prost;
 extern crate sha2;
 
 use bytes::Bytes;
