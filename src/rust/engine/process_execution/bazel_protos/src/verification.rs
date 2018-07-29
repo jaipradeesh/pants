@@ -1,15 +1,15 @@
-use protobuf;
-use remote_execution;
+use build::bazel::remote::execution::v2 as remote_execution;
+use prost;
 
 use std::collections::HashSet;
 
 pub fn verify_directory_canonical(directory: &remote_execution::Directory) -> Result<(), String> {
-  verify_no_unknown_fields(directory)?;
-  verify_nodes(directory.get_files(), |n| n.get_name(), |n| n.get_digest())?;
+  //verify_no_unknown_fields(directory)?;
+  verify_nodes(&directory.files, |n| &n.name, |n| &n.digest)?;
   verify_nodes(
-    directory.get_directories(),
-    |n| n.get_name(),
-    |n| n.get_digest(),
+    &directory.directories,
+    |n| &n.name,
+    |n| &n.digest,
   )?;
   let file_names: HashSet<&str> = directory
     .get_files()
@@ -32,14 +32,14 @@ fn verify_nodes<Node, GetName, GetDigest>(
   get_digest: GetDigest,
 ) -> Result<(), String>
 where
-  Node: protobuf::Message,
+  Node: prost::Message,
   GetName: Fn(&Node) -> &str,
   GetDigest: Fn(&Node) -> &remote_execution::Digest,
 {
   let mut prev: Option<&Node> = None;
   for node in nodes {
-    verify_no_unknown_fields(node)?;
-    verify_no_unknown_fields(get_digest(node))?;
+    //verify_no_unknown_fields(node)?;
+    //verify_no_unknown_fields(get_digest(node))?;
     if get_name(node).contains('/') {
       return Err(format!(
         "All children must have one path segment, but found {}",
@@ -60,21 +60,20 @@ where
   Ok(())
 }
 
-fn verify_no_unknown_fields(message: &protobuf::Message) -> Result<(), String> {
-  if message.get_unknown_fields().fields.is_some() {
-    return Err(format!(
-      "Found unknown fields: {:?}",
-      message.get_unknown_fields()
-    ));
-  }
-  Ok(())
-}
+//fn verify_no_unknown_fields(message: &prost::Message) -> Result<(), String> {
+//  if message.get_unknown_fields().fields.is_some() {
+//    return Err(format!(
+//      "Found unknown fields: {:?}",
+//      message.get_unknown_fields()
+//    ));
+//  }
+//  Ok(())
+//}
 
 #[cfg(test)]
 mod canonical_directory_tests {
   use super::remote_execution::{Digest, Directory, DirectoryNode, FileNode};
   use super::verify_directory_canonical;
-  use protobuf::Message;
 
   const HASH: &str = "693d8db7b05e99c6b7a7c0616456039d89c555029026936248085193559a0b5d";
   const FILE_SIZE: i64 = 16;

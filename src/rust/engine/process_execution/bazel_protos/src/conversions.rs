@@ -1,19 +1,20 @@
 use hashing;
+use build::bazel::remote::execution::v2 as remote_execution;
 
-impl<'a> From<&'a hashing::Digest> for super::remote_execution::Digest {
+impl<'a> From<&'a hashing::Digest> for remote_execution::Digest {
   fn from(d: &hashing::Digest) -> Self {
-    let mut digest = super::remote_execution::Digest::new();
-    digest.set_hash(d.0.to_hex());
-    digest.set_size_bytes(d.1 as i64);
-    digest
+    remote_execution::Digest {
+      hash: d.0.to_hex(),
+      size_bytes: d.1 as i64,
+    }
   }
 }
 
-impl<'a> From<&'a super::remote_execution::Digest> for Result<hashing::Digest, String> {
-  fn from(d: &super::remote_execution::Digest) -> Self {
-    hashing::Fingerprint::from_hex_string(d.get_hash())
-      .map_err(|err| format!("Bad fingerprint in Digest {:?}: {:?}", d.get_hash(), err))
-      .map(|fingerprint| hashing::Digest(fingerprint, d.get_size_bytes() as usize))
+impl<'a> From<&'a remote_execution::Digest> for Result<hashing::Digest, String> {
+  fn from(d: &remote_execution::Digest) -> Self {
+    hashing::Fingerprint::from_hex_string(&d.hash)
+      .map_err(|err| format!("Bad fingerprint in Digest {:?}: {:?}", d.hash, err))
+      .map(|fingerprint| hashing::Digest(fingerprint, d.size_bytes as usize))
   }
 }
 
@@ -29,19 +30,20 @@ mod tests {
       ).unwrap(),
       10,
     );
-    let converted: super::super::remote_execution::Digest = our_digest.into();
-    let mut want = super::super::remote_execution::Digest::new();
-    want.set_hash("0123456789abcdeffedcba98765432100000000000000000ffffffffffffffff".to_owned());
-    want.set_size_bytes(10);
+    let converted: super::remote_execution::Digest = our_digest.into();
+    let want = super::remote_execution::Digest {
+      hash: "0123456789abcdeffedcba98765432100000000000000000ffffffffffffffff".to_owned(),
+      size_bytes: 10,
+    };
     assert_eq!(converted, want);
   }
 
   #[test]
   fn from_bazel_digest() {
-    let mut bazel_digest = super::super::remote_execution::Digest::new();
-    bazel_digest
-      .set_hash("0123456789abcdeffedcba98765432100000000000000000ffffffffffffffff".to_owned());
-    bazel_digest.set_size_bytes(10);
+    let bazel_digest = super::remote_execution::Digest {
+      hash: "0123456789abcdeffedcba98765432100000000000000000ffffffffffffffff".to_owned(),
+      size_bytes: 10,
+    };
     let converted: Result<hashing::Digest, String> = (&bazel_digest).into();
     let want = hashing::Digest(
       hashing::Fingerprint::from_hex_string(
@@ -54,9 +56,10 @@ mod tests {
 
   #[test]
   fn from_bad_bazel_digest() {
-    let mut bazel_digest = super::super::remote_execution::Digest::new();
-    bazel_digest.set_hash("0".to_owned());
-    bazel_digest.set_size_bytes(10);
+    let bazel_digest = super::remote_execution::Digest {
+      hash: "0".to_owned(),
+      size_bytes: 10,
+    };
     let converted: Result<hashing::Digest, String> = (&bazel_digest).into();
     let err = converted.expect_err("Want Err converting bad digest");
     assert!(

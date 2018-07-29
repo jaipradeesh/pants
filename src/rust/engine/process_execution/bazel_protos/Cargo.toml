@@ -6,12 +6,12 @@ publish = false
 
 [dependencies]
 bytes = "0.4.5"
-futures = "^0.1.16"
-grpcio = { version = "0.2.0", features = ["secure"] }
 hashing = { path = "../../hashing" }
-protobuf = { version = "1.4.1", features = ["with-bytes"] }
+prost = "0.4"
+prost-derive = "0.4"
+prost-types = "0.4"
+tower-grpc = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-grpc", features = ["prost"] }
 
 [build-dependencies]
 build_utils = { path = "../../build_utils" }
-grpcio-compiler = "0.2.0"
-protoc-grpcio = "0.1.1"
+tower-grpc-build = { path = "/Users/dwagnerhall/src/github.com/tower-rs/tower-grpc/tower-grpc-build" }
