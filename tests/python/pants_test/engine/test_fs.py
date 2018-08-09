@@ -337,7 +337,12 @@ class FSTest(TestBase, SchedulerTestBase, AbstractClass):
         ))
       )
 
-      empty_merged = scheduler.merge_directories((empty_snapshot.directory_digest))
+      with self.assertRaises(Exception):
+        # Should raise, because this arg isn't a tuple, but instead silently logs an exception and
+        # the project_multi returns an empty Vec:
+        scheduler.merge_directories(roland_snapshot.directory_digest)
+
+      empty_merged = scheduler.merge_directories((empty_snapshot.directory_digest,))
       self.assertEqual(
         empty_snapshot.directory_digest,
         empty_merged,
