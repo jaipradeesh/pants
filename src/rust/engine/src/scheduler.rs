@@ -11,7 +11,7 @@ use futures::future::{self, Future};
 
 use boxfuture::{BoxFuture, Boxable};
 use context::{Context, Core};
-use core::{Failure, Key, Params, TypeConstraint, TypeId, Value};
+use core::{Failure, Key, Params, TypeConstraint, TypeId, Value, throw};
 use fs::{self, GlobMatching, PosixFS};
 use graph::{EntryId, Graph, Node, NodeContext};
 use nodes::{NodeKey, Select, Tracer, TryInto, Visualizer};
@@ -46,10 +46,10 @@ impl Session {
     roots.extend(new_roots.iter().cloned());
   }
 
-  fn root_nodes(&self) -> Vec<NodeKey> {
-    let roots = self.roots.lock();
-    roots.iter().map(|r| r.clone().into()).collect()
-  }
+//  fn root_nodes(&self) -> Vec<NodeKey> {
+//    let roots = self.roots.lock();
+//    roots.iter().map(|r| r.clone().into()).collect()
+//  }
 }
 
 pub struct ExecutionRequest {
@@ -62,13 +62,13 @@ impl ExecutionRequest {
     ExecutionRequest { roots: Vec::new() }
   }
 
-  ///
-  /// Roots are limited to `Select`, which is known to produce a Value. This method
-  /// exists to satisfy Graph APIs which need instances of the NodeKey enum.
-  ///
-  fn root_nodes(&self) -> Vec<NodeKey> {
-    self.roots.iter().map(|r| r.clone().into()).collect()
-  }
+//  ///
+//  /// Roots are limited to `Select`, which is known to produce a Value. This method
+//  /// exists to satisfy Graph APIs which need instances of the NodeKey enum.
+//  ///
+//  fn root_nodes(&self) -> Vec<NodeKey> {
+//    self.roots.iter().map(|r| r.clone().into()).collect()
+//  }
 }
 
 ///
@@ -86,17 +86,18 @@ impl Scheduler {
   }
 
   pub fn visualize(&self, session: &Session, path: &Path) -> io::Result<()> {
-    self
-      .core
-      .graph
-      .visualize(Visualizer::default(), &session.root_nodes(), path)
+    Ok(())
+//    self
+//      .core
+//      .graph
+//      .visualize(Visualizer::default(), &session.root_nodes(), path)
   }
 
   pub fn trace(&self, request: &ExecutionRequest, path: &Path) -> Result<(), String> {
-    self
-      .core
-      .graph
-      .trace::<Tracer>(&request.root_nodes(), path)?;
+//    self
+//      .core
+//      .graph
+//      .trace::<Tracer>(&request.root_nodes(), path)?;
     Ok(())
   }
 
@@ -106,23 +107,18 @@ impl Scheduler {
     subject: Key,
     product: TypeConstraint,
   ) -> Result<(), String> {
-    let edges = self.find_root_edges_or_update_rule_graph(
-      subject.type_id().clone(),
-      &selectors::Select::new(product),
-    )?;
     request
       .roots
-      .push(Select::new(product, Params::new_single(subject), &edges));
+      .push((selectors::Select::new(product), Params::new_single(subject)));
     Ok(())
   }
 
   fn find_root_edges_or_update_rule_graph(
-    &self,
+    core: Arc<Core>,
     subject_type: TypeId,
     select: &selectors::Select,
   ) -> Result<rule_graph::RuleEdges, String> {
-    self
-      .core
+    core
       .rule_graph
       .find_root_edges(subject_type, select.clone())
       .ok_or_else(|| {
@@ -166,13 +162,13 @@ impl Scheduler {
   ///
   pub fn metrics(&self, session: &Session) -> HashMap<&str, i64> {
     let mut m = HashMap::new();
-    m.insert(
-      "affected_file_count",
-      self
-        .core
-        .graph
-        .reachable_digest_count(&session.root_nodes()) as i64,
-    );
+//    m.insert(
+//      "affected_file_count",
+//      self
+//        .core
+//        .graph
+//        .reachable_digest_count(&session.root_nodes()) as i64,
+//    );
     m.insert("preceding_graph_size", session.preceding_graph_size as i64);
     m.insert("resulting_graph_size", self.core.graph.len() as i64);
     m
@@ -201,10 +197,19 @@ impl Scheduler {
         .clone()
         .into_iter()
         .map(|root| {
-          context
+          let edges = try_future!(Scheduler::find_root_edges_or_update_rule_graph(
+            context.clone().core,
+            // TODO: Don't expect
+            root.1.expect_single().type_id().clone(),
+            &root.0,
+          ).map_err(|s| throw(&s)));
+          // TODO: Maybe change Select::new's first param type
+          let select = Select::new(root.0.product, root.1, &edges);
+
+          let f: BoxFuture<_, _> = context
             .core
             .graph
-            .create(root.clone().into(), &context)
+            .create(select.into(), &context)
             .then::<_, Result<Result<Value, Failure>, Failure>>(move |r| {
               match r {
                 Err(Failure::Invalidated) if count > 0 => {
@@ -215,10 +220,10 @@ impl Scheduler {
                   // Otherwise (if it is a success, some other type of Failure, or if we've run
                   // out of retries) recover to complete the join, which will cause the results to
                   // propagate to the user.
-                  debug!(
-                    "Root {} completed.",
-                    NodeKey::Select(Box::new(root)).format()
-                  );
+//                  debug!(
+//                    "Root {} completed.",
+//                    NodeKey::Select(Box::new(root)).format()
+//                  );
                   Ok(other.map(|res| {
                     res
                       .try_into()
@@ -226,7 +231,8 @@ impl Scheduler {
                   }))
                 }
               }
-            })
+            }).to_boxed();
+          f
         }).collect::<Vec<_>>(),
     );
 
@@ -272,7 +278,7 @@ impl Scheduler {
       .roots
       .iter()
       .zip(results.into_iter())
-      .map(|(s, r)| (s.params.expect_single(), &s.selector.product, r))
+      .map(|(s, r)| (s.1.expect_single(), &s.0.product, r))
       .collect()
   }
 
@@ -318,7 +324,7 @@ impl Drop for Scheduler {
 ///
 /// Root requests are limited to Selectors that produce (python) Values.
 ///
-type Root = Select;
+type Root = (selectors::Select, Params);
 
 pub type RootResult = Result<Value, Failure>;
 
