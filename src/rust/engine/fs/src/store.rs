@@ -1548,9 +1548,6 @@ mod remote {
 
   #[derive(Clone)]
   pub struct ByteStore {
-    byte_stream_client: Resettable<Arc<bazel_protos::bytestream_grpc::ByteStreamClient>>,
-    cas_client:
-      Resettable<Arc<bazel_protos::remote_execution_grpc::ContentAddressableStorageClient>>,
     instance_name: Option<String>,
     chunk_size_bytes: usize,
     upload_timeout: Duration,
@@ -1582,22 +1579,8 @@ mod remote {
           builder.connect(&cas_address)
         }
       });
-      let channel2 = channel.clone();
-      let channel3 = channel.clone();
-      let byte_stream_client = Resettable::new(move || {
-        Arc::new(bazel_protos::bytestream_grpc::ByteStreamClient::new(
-          channel2.get(),
-        ))
-      });
-      let cas_client = Resettable::new(move || {
-        Arc::new(
-          bazel_protos::remote_execution_grpc::ContentAddressableStorageClient::new(channel3.get()),
-        )
-      });
 
       ByteStore {
-        byte_stream_client,
-        cas_client,
         instance_name,
         chunk_size_bytes,
         upload_timeout,
@@ -1611,11 +1594,7 @@ mod remote {
     where
       F: FnOnce() -> (),
     {
-      self.cas_client.with_reset(|| {
-        self
-          .byte_stream_client
-          .with_reset(|| self.channel.with_reset(|| self.env.with_reset(f)))
-      })
+      self.channel.with_reset(|| self.env.with_reset(f))
     }
 
     fn call_option(&self) -> grpcio::CallOption {
@@ -1630,6 +1609,10 @@ mod remote {
       call_option
     }
 
+    fn byte_stream_client(&self) -> bazel_protos::bytestream_grpc::ByteStreamClient {
+      bazel_protos::bytestream_grpc::ByteStreamClient::new(self.channel.get())
+    }
+
     pub fn store_bytes(&self, bytes: Bytes) -> BoxFuture<Digest, String> {
       let mut hasher = Sha256::default();
       hasher.input(&bytes);
@@ -1642,16 +1625,16 @@ mod remote {
         fingerprint,
         bytes.len()
       );
-      match self
-        .byte_stream_client
-        .get()
+      let client = self.byte_stream_client();
+      match client
         .write_opt(self.call_option().timeout(self.upload_timeout))
+        .map(|v| (v, client))
       {
         Err(err) => future::err(format!(
           "Error attempting to connect to upload fingerprint {}: {:?}",
           fingerprint, err
         )).to_boxed(),
-        Ok((sender, receiver)) => {
+        Ok(((sender, receiver), client)) => {
           let chunk_size_bytes = self.chunk_size_bytes;
           let stream =
             futures::stream::unfold::<_, _, futures::future::FutureResult<_, grpcio::Error>, _>(
@@ -1674,7 +1657,7 @@ mod remote {
               },
             );
 
-          future::ok(self.byte_stream_client.get())
+          future::ok(client)
             .join(sender.send_all(stream).map_err(move |e| {
               format!(
                 "Error attempting to upload fingerprint {}: {:?}",
@@ -1709,26 +1692,29 @@ mod remote {
       digest: Digest,
       f: F,
     ) -> BoxFuture<Option<T>, String> {
-      match self.byte_stream_client.get().read_opt(
-        &{
-          let mut req = bazel_protos::bytestream::ReadRequest::new();
-          req.set_resource_name(format!(
-            "{}/blobs/{}/{}",
-            self.instance_name.clone().unwrap_or_default(),
-            digest.0,
-            digest.1
-          ));
-          req.set_read_offset(0);
-          // 0 means no limit.
-          req.set_read_limit(0);
-          req
-        },
-        self.call_option(),
-      ) {
-        Ok(stream) => {
+      let client = self.byte_stream_client();
+      match client
+        .read_opt(
+          &{
+            let mut req = bazel_protos::bytestream::ReadRequest::new();
+            req.set_resource_name(format!(
+              "{}/blobs/{}/{}",
+              self.instance_name.clone().unwrap_or_default(),
+              digest.0,
+              digest.1
+            ));
+            req.set_read_offset(0);
+            // 0 means no limit.
+            req.set_read_limit(0);
+            req
+          },
+          self.call_option(),
+        ).map(|stream| (stream, client))
+      {
+        Ok((stream, client)) => {
           // We shouldn't have to pass around the client here, it's a workaround for
           // https://github.com/pingcap/grpc-rs/issues/123
-          future::ok(self.byte_stream_client.get())
+          future::ok(client)
             .join(
               stream.fold(BytesMut::with_capacity(digest.1), move |mut bytes, r| {
                 bytes.extend_from_slice(&r.data);
@@ -1769,9 +1755,7 @@ mod remote {
       for digest in digests {
         request.mut_blob_digests().push(digest.into());
       }
-      self
-        .cas_client
-        .get()
+      bazel_protos::remote_execution_grpc::ContentAddressableStorageClient::new(self.channel.get())
         .find_missing_blobs_opt(&request, self.call_option())
         .map_err(|err| {
           format!(
