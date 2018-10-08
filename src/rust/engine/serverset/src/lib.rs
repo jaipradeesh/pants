@@ -42,6 +42,18 @@ use std::time::{Duration, Instant};
 /// back into rotation with exponential ease-in.
 ///
 pub struct Serverset<T> {
+  inner: Arc<Inner<T>>,
+}
+
+impl<T> Clone for Serverset<T> {
+  fn clone(&self) -> Self {
+    Serverset {
+      inner: self.inner.clone(),
+    }
+  }
+}
+
+struct Inner<T> {
   servers: Vec<Backend<T>>,
 
   // Only visible for testing
@@ -91,7 +103,7 @@ pub struct BackoffConfig {
   pub max_lame: Duration,
 }
 
-impl<T> Serverset<T> {
+impl<T: Clone + Send + Sync + 'static> Serverset<T> {
   pub fn new(servers: Vec<T>, backoff_config: BackoffConfig) -> Result<Self, String> {
     if servers.is_empty() {
       return Err("Must supply some servers".to_owned());
@@ -119,44 +131,57 @@ impl<T> Serverset<T> {
     let backoff_ratio =
       num_rational::Ratio::new(*backoff_ratio.numer() as u32, *backoff_ratio.denom() as u32);
     Ok(Serverset {
-      servers: servers
-        .into_iter()
-        .map(|s| Backend {
-          server: s,
-          unhealthy_info: Arc::new(Mutex::new(None)),
-        }).collect(),
-      next: AtomicUsize::new(0),
-      failure_initial_lame: initial_lame,
-      failure_backoff_ratio: backoff_ratio,
-      failure_max_lame: max_lame,
+      inner: Arc::new(Inner {
+        servers: servers
+          .into_iter()
+          .map(|s| Backend {
+            server: s,
+            unhealthy_info: Arc::new(Mutex::new(None)),
+          }).collect(),
+        next: AtomicUsize::new(0),
+        failure_initial_lame: initial_lame,
+        failure_backoff_ratio: backoff_ratio,
+        failure_max_lame: max_lame,
+      }),
     })
   }
 
   ///
-  /// Call a function with a healthy resource.
+  /// Get the next (probably) healthy backend to use.
   ///
-  /// The function should return a tuple of (Health, V) for any V.
+  /// The caller will be given a backend to use, and should call the supplied callback with the
+  /// observed health of that backend.
+  ///
+  /// If the callback is not called, the health status of the server will not be changed from its
+  /// last known status.
   ///
   /// If all resources are unhealthy, this function will block the calling thread until the backoff
   /// period has completed. We'd probably prefer to use some Future-based scheduling, but that
   /// would require this type to be Resettable because of our fork model, which would be very
   /// complex.
   ///
-  pub fn call<Ret, F: FnOnce(&T) -> (Health, Ret)>(&self, f: F) -> Ret {
-    let server = loop {
-      let i = self.next.fetch_add(1, Ordering::Relaxed) % self.servers.len();
-      let server = &self.servers[i];
+  pub fn next(&self) -> (T, Box<Fn(Health) + Send + Sync>) {
+    let (i, server) = loop {
+      let i = self.inner.next.fetch_add(1, Ordering::Relaxed) % self.inner.servers.len();
+      let server = &self.inner.servers[i];
       let unhealthy_info = server.unhealthy_info.lock();
       if let Some(ref unhealthy_info) = *unhealthy_info {
         if unhealthy_info.unhealthy_since.elapsed() < unhealthy_info.next_attempt_after {
           continue;
         }
       }
-      break server;
+      break (i, server);
     };
 
-    let (health, ret) = f(&server.server);
-    let mut unhealthy_info = server.unhealthy_info.lock();
+    let serverset: Serverset<T> = (*self).clone();
+
+    let callback = Box::new(move |health: Health| serverset.callback(i, health));
+
+    (server.server.clone(), callback)
+  }
+
+  fn callback(&self, server_index: usize, health: Health) {
+    let mut unhealthy_info = self.inner.servers[server_index].unhealthy_info.lock();
     match health {
       Health::Unhealthy => {
         if unhealthy_info.is_some() {
@@ -164,15 +189,17 @@ impl<T> Serverset<T> {
             unhealthy_info.unhealthy_since = Instant::now();
             // failure_backoff_ratio's numer and denom both fit in u8s, so hopefully this won't
             // overflow of lose too much precision...
-            unhealthy_info.next_attempt_after *= *self.failure_backoff_ratio.numer();
-            unhealthy_info.next_attempt_after /= *self.failure_backoff_ratio.denom();
-            unhealthy_info.next_attempt_after =
-              std::cmp::min(unhealthy_info.next_attempt_after, self.failure_max_lame);
+            unhealthy_info.next_attempt_after *= *self.inner.failure_backoff_ratio.numer();
+            unhealthy_info.next_attempt_after /= *self.inner.failure_backoff_ratio.denom();
+            unhealthy_info.next_attempt_after = std::cmp::min(
+              unhealthy_info.next_attempt_after,
+              self.inner.failure_max_lame,
+            );
           }
         } else {
           *unhealthy_info = Some(UnhealthyInfo {
             unhealthy_since: Instant::now(),
-            next_attempt_after: self.failure_initial_lame,
+            next_attempt_after: self.inner.failure_initial_lame,
           });
         }
       }
@@ -180,14 +207,14 @@ impl<T> Serverset<T> {
         if unhealthy_info.is_some() {
           let mut reset = false;
           if let Some(ref mut unhealthy_info) = *unhealthy_info {
-            reset = unhealthy_info.next_attempt_after <= self.failure_initial_lame;
+            reset = unhealthy_info.next_attempt_after <= self.inner.failure_initial_lame;
 
             if !reset {
               unhealthy_info.unhealthy_since = Instant::now();
               // failure_backoff_ratio's numer and denom both fit in u8s, so hopefully this won't
               // overflow of lose too much precision...
-              unhealthy_info.next_attempt_after *= *self.failure_backoff_ratio.denom();
-              unhealthy_info.next_attempt_after /= *self.failure_backoff_ratio.numer();
+              unhealthy_info.next_attempt_after *= *self.inner.failure_backoff_ratio.denom();
+              unhealthy_info.next_attempt_after /= *self.inner.failure_backoff_ratio.numer();
             }
           }
           if reset {
@@ -196,13 +223,12 @@ impl<T> Serverset<T> {
         }
       }
     }
-    ret
   }
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Serverset<T> {
   fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-    write!(f, "Serverset {{ {:?} }}", self.servers);
+    write!(f, "Serverset {{ {:?} }}", self.inner.servers);
     Ok(())
   }
 }
@@ -237,38 +263,21 @@ mod tests {
   }
 
   #[test]
-  fn returns_value() {
-    let s = Serverset::new(vec!["good", "bad"], backoff_config()).unwrap();
-
-    let mut returned = HashSet::new();
-    for _ in 0..2 {
-      returned.insert(s.call(|server| (Health::Healthy, server.to_uppercase())));
-    }
-
-    let want: HashSet<_> = vec!["GOOD".to_owned(), "BAD".to_owned()]
-      .into_iter()
-      .collect();
-
-    assert_eq!(returned, want);
-  }
-
-  #[test]
   fn handles_overflow_internally() {
-    let both: HashSet<_> = vec!["good", "bad"].into_iter().collect();
-
     let s = Serverset::new(vec!["good", "bad"], backoff_config()).unwrap();
-    s.next.store(std::usize::MAX, Ordering::SeqCst);
+    s.inner.next.store(std::usize::MAX, Ordering::SeqCst);
 
     let mut visited = HashSet::new();
 
     // 3 because we may skip some values if the number of servers isn't a factor of
     // std::usize::MAX, so we make sure to go around them all again after overflowing.
     for _ in 0..3 {
-      s.call(|server| {
-        visited.insert(*server);
-        (Health::Healthy, ())
-      });
+      let (server, callback) = s.next();
+      visited.insert(server);
+      callback(Health::Healthy);
     }
+
+    let both: HashSet<_> = vec!["good", "bad"].into_iter().collect();
 
     assert_eq!(visited, both);
   }
@@ -326,10 +335,9 @@ mod tests {
     let mut saw = HashSet::new();
 
     for _ in 0..2 {
-      s.call(|server| {
-        saw.insert(*server);
-        (Health::Healthy, ())
-      });
+      let (server, callback) = s.next();
+      saw.insert(server);
+      callback(Health::Healthy);
     }
     let expect: HashSet<_> = vec!["good", "bad"].into_iter().collect();
     assert_eq!(expect, saw);
@@ -338,14 +346,13 @@ mod tests {
   fn mark(s: &Serverset<&'static str>, health: Health) {
     let mut saw_bad = false;
     for _ in 0..2 {
-      s.call(|server| {
-        if *server == "bad" {
-          saw_bad = true;
-          (health, ())
-        } else {
-          (Health::Healthy, ())
-        }
-      });
+      let (server, callback) = s.next();
+      if server == "bad" {
+        saw_bad = true;
+        callback(health);
+      } else {
+        callback(Health::Healthy);
+      }
     }
     assert!(saw_bad);
   }
@@ -355,10 +362,9 @@ mod tests {
 
     let start = std::time::Instant::now();
     while start.elapsed() < duration - buffer {
-      s.call(|server| {
-        assert_eq!("good", *server);
-        (Health::Healthy, ())
-      });
+      let (server, callback) = s.next();
+      assert_eq!("good", server);
+      callback(Health::Healthy);
     }
 
     std::thread::sleep(buffer * 2);
