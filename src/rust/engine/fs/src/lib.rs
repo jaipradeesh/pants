@@ -67,6 +67,7 @@ extern crate parking_lot;
 extern crate protobuf;
 extern crate resettable;
 extern crate serde;
+extern crate serverset;
 extern crate sha2;
 #[cfg(test)]
 extern crate tempfile;
@@ -75,6 +76,8 @@ extern crate testutil;
 #[macro_use]
 extern crate serde_derive;
 extern crate uuid;
+
+pub use serverset::BackoffConfig;
 
 use std::cmp::min;
 use std::io::{self, Read};

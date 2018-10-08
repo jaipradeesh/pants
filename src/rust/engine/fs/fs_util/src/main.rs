@@ -193,6 +193,8 @@ to this directory.",
               .takes_value(true)
               .long("server-address")
               .required(false)
+              .multiple(true)
+              .number_of_values(1)
         )
         .arg(
           Arg::with_name("root-ca-cert-file")
@@ -237,8 +239,8 @@ fn execute(top_match: &clap::ArgMatches) -> Result<(), ExitError> {
     .unwrap_or_else(Store::default_path);
   let pool = Arc::new(ResettablePool::new("fsutil-pool-".to_string()));
   let (store, store_has_remote) = {
-    let (store_result, store_has_remote) = match top_match.value_of("server-address") {
-      Some(cas_address) => {
+    let (store_result, store_has_remote) = match top_match.values_of("server-address") {
+      Some(cas_addresses) => {
         let chunk_size =
           value_t!(top_match.value_of("chunk-bytes"), usize).expect("Bad chunk-bytes flag");
 
@@ -264,7 +266,7 @@ fn execute(top_match: &clap::ArgMatches) -> Result<(), ExitError> {
           Store::with_remote(
             &store_dir,
             pool.clone(),
-            cas_address.to_owned(),
+            cas_addresses.map(str::to_owned).collect(),
             top_match
               .value_of("remote-instance_name")
               .map(str::to_owned),
@@ -281,6 +283,11 @@ fn execute(top_match: &clap::ArgMatches) -> Result<(), ExitError> {
             //
             // See https://github.com/pantsbuild/pants/pull/6433 for more context.
             Duration::from_secs(30 * 60),
+            fs::BackoffConfig {
+              initial_lame: Duration::from_secs(1),
+              backoff_ratio: 1.2,
+              max_lame: Duration::from_secs(20),
+            },
           ),
           true,
         )

@@ -13,7 +13,7 @@ use futures::Future;
 
 use boxfuture::{BoxFuture, Boxable};
 use core::{Failure, TypeId};
-use fs::{safe_create_dir_all_ioerror, PosixFS, ResettablePool, Store};
+use fs::{safe_create_dir_all_ioerror, BackoffConfig, PosixFS, ResettablePool, Store};
 use graph::{EntryId, Graph, NodeContext};
 use handles::maybe_drop_handles;
 use nodes::{NodeKey, TryInto, WrappedNode};
@@ -52,7 +52,7 @@ impl Core {
     build_root: &Path,
     ignore_patterns: &[String],
     work_dir: PathBuf,
-    remote_store_server: Option<String>,
+    remote_store_servers: Vec<String>,
     remote_execution_server: Option<String>,
     remote_instance_name: Option<String>,
     remote_root_ca_certs_path: Option<PathBuf>,
@@ -92,19 +92,27 @@ impl Core {
 
     let store = safe_create_dir_all_ioerror(&store_path)
       .map_err(|e| format!("Error making directory {:?}: {:?}", store_path, e))
-      .and_then(|()| match remote_store_server {
-        Some(address) => Store::with_remote(
-          store_path,
-          fs_pool.clone(),
-          address,
-          remote_instance_name.clone(),
-          root_ca_certs.clone(),
-          oauth_bearer_token.clone(),
-          remote_store_thread_count,
-          remote_store_chunk_bytes,
-          remote_store_chunk_upload_timeout,
-        ),
-        None => Store::local_only(store_path, fs_pool.clone()),
+      .and_then(|()| {
+        if remote_store_servers.is_empty() {
+          Store::local_only(store_path, fs_pool.clone())
+        } else {
+          Store::with_remote(
+            store_path,
+            fs_pool.clone(),
+            remote_store_servers,
+            remote_instance_name.clone(),
+            root_ca_certs.clone(),
+            oauth_bearer_token.clone(),
+            remote_store_thread_count,
+            remote_store_chunk_bytes,
+            remote_store_chunk_upload_timeout,
+            BackoffConfig {
+              initial_lame: std::time::Duration::from_secs(1),
+              backoff_ratio: 1.2,
+              max_lame: std::time::Duration::from_secs(20),
+            },
+          )
+        }
       }).unwrap_or_else(|e| panic!("Could not initialize Store: {:?}", e));
 
     let underlying_command_runner: Box<CommandRunner> = match remote_execution_server {

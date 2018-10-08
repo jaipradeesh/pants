@@ -64,7 +64,7 @@ class ExecutionOptions(datatype([
 
 
 DEFAULT_EXECUTION_OPTIONS = ExecutionOptions(
-    remote_store_server=None,
+    remote_store_server=(),
     remote_store_thread_count=1,
     remote_execution_server=None,
     remote_store_chunk_bytes=1024*1024,
@@ -274,7 +274,7 @@ class GlobalOptionsRegistrar(SubsystemClientMixin, Optionable):
              advanced=True,
              help='Whether to allow import statements in BUILD files')
 
-    register('--remote-store-server', advanced=True,
+    register('--remote-store-server', advanced=True, type=tuple, default=(),
              help='host:port of grpc server to use as remote execution file store.')
     register('--remote-store-thread-count', type=int, advanced=True,
              default=DEFAULT_EXECUTION_OPTIONS.remote_store_thread_count,

@@ -781,6 +781,8 @@ fn digest(message: &Message) -> Result<bazel_protos::remote_execution::Digest, S
 
 #[cfg(test)]
 mod tests {
+  extern crate serverset;
+
   use bazel_protos;
   use bytes::Bytes;
   use fs;
@@ -1159,13 +1161,14 @@ mod tests {
     let store = fs::Store::with_remote(
       &store_dir_path,
       Arc::new(fs::ResettablePool::new("test-pool-".to_owned())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).expect("Failed to make store");
 
     let cmd_runner = CommandRunner::new(mock_server.address(), None, None, None, 1, store);
@@ -1509,13 +1512,14 @@ mod tests {
     let store = fs::Store::with_remote(
       store_dir,
       Arc::new(fs::ResettablePool::new("test-pool-".to_owned())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).expect("Failed to make store");
     store
       .store_file_bytes(roland.bytes(), false)
@@ -1588,13 +1592,14 @@ mod tests {
     let store = fs::Store::with_remote(
       store_dir,
       Arc::new(fs::ResettablePool::new("test-pool-".to_owned())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).expect("Failed to make store");
     store
       .store_file_bytes(roland.bytes(), false)
@@ -1648,13 +1653,14 @@ mod tests {
     let store = fs::Store::with_remote(
       store_dir,
       Arc::new(fs::ResettablePool::new("test-pool-".to_owned())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).expect("Failed to make store");
 
     let error = CommandRunner::new(mock_server.address(), None, None, None, 1, store)
@@ -2214,13 +2220,14 @@ mod tests {
     let store = fs::Store::with_remote(
       store_dir,
       Arc::new(fs::ResettablePool::new("test-pool-".to_owned())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).expect("Failed to make store");
 
     CommandRunner::new(address, None, None, None, 1, store)
@@ -2305,6 +2312,14 @@ mod tests {
       timeout: Duration::from_millis(1000),
       description: "unleash a roaring meow".to_string(),
       jdk_home: None,
+    }
+  }
+
+  pub fn backoff_config() -> serverset::BackoffConfig {
+    serverset::BackoffConfig {
+      initial_lame: Duration::from_secs(1),
+      backoff_ratio: 1.2,
+      max_lame: Duration::from_secs(20),
     }
   }
 }

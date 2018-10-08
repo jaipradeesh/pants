@@ -624,7 +624,9 @@ fn main() {
       clap::Arg::with_name("server-address")
         .takes_value(true)
         .long("server-address")
-        .required(false),
+        .required(false)
+        .multiple(true)
+        .number_of_values(1),
     ).arg(
       clap::Arg::with_name("remote-instance-name")
         .takes_value(true)
@@ -675,17 +677,22 @@ fn main() {
   };
 
   let pool = Arc::new(fs::ResettablePool::new("brfs-".to_owned()));
-  let store = match args.value_of("server-address") {
+  let store = match args.values_of("server-address") {
     Some(address) => fs::Store::with_remote(
       &store_path,
       pool,
-      address.to_owned(),
+      address.map(str::to_owned).collect(),
       args.value_of("remote-instance-name").map(str::to_owned),
       root_ca_certs,
       oauth_bearer_token,
       1,
       4 * 1024 * 1024,
       std::time::Duration::from_secs(5 * 60),
+      fs::BackoffConfig {
+        initial_lame: std::time::Duration::from_secs(1),
+        backoff_ratio: 1.2,
+        max_lame: std::time::Duration::from_secs(20),
+      },
     ),
     None => fs::Store::local_only(&store_path, pool),
   }.expect("Error making store");

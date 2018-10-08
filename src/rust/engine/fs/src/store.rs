@@ -1,5 +1,6 @@
 use FileContent;
 
+use super::BackoffConfig;
 use bazel_protos;
 use boxfuture::{BoxFuture, Boxable};
 use bytes::Bytes;
@@ -79,25 +80,27 @@ impl Store {
   pub fn with_remote<P: AsRef<Path>>(
     path: P,
     pool: Arc<ResettablePool>,
-    cas_address: String,
+    cas_addresses: Vec<String>,
     instance_name: Option<String>,
     root_ca_certs: Option<Vec<u8>>,
     oauth_bearer_token: Option<String>,
     thread_count: usize,
     chunk_size_bytes: usize,
-    timeout: Duration,
+    upload_timeout: Duration,
+    backoff_config: BackoffConfig,
   ) -> Result<Store, String> {
     Ok(Store {
       local: local::ByteStore::new(path, pool)?,
       remote: Some(remote::ByteStore::new(
-        cas_address,
+        cas_addresses,
         instance_name,
         root_ca_certs,
         oauth_bearer_token,
         thread_count,
         chunk_size_bytes,
-        timeout,
-      )),
+        upload_timeout,
+        backoff_config,
+      )?),
     })
   }
 
@@ -1529,7 +1532,7 @@ mod local {
 }
 
 mod remote {
-  use super::EntryType;
+  use super::{BackoffConfig, EntryType};
 
   use bazel_protos;
   use boxfuture::{BoxFuture, Boxable};
@@ -1539,7 +1542,9 @@ mod remote {
   use grpcio;
   use hashing::{Digest, Fingerprint};
   use resettable::Resettable;
+  use serverset::{self, Serverset};
   use sha2::Sha256;
+  use std;
   use std::cmp::min;
   use std::collections::HashSet;
   use std::sync::Arc;
@@ -1552,49 +1557,59 @@ mod remote {
     chunk_size_bytes: usize,
     upload_timeout: Duration,
     env: Resettable<Arc<grpcio::Environment>>,
-    channel: Resettable<grpcio::Channel>,
+    serverset: Resettable<Result<Arc<Serverset<grpcio::Channel>>, String>>,
     authorization_header: Option<String>,
   }
 
   impl ByteStore {
     pub fn new(
-      cas_address: String,
+      cas_addresses: Vec<String>,
       instance_name: Option<String>,
       root_ca_certs: Option<Vec<u8>>,
       oauth_bearer_token: Option<String>,
       thread_count: usize,
       chunk_size_bytes: usize,
       upload_timeout: Duration,
-    ) -> ByteStore {
+      backoff_config: BackoffConfig,
+    ) -> Result<ByteStore, String> {
       let env = Resettable::new(move || Arc::new(grpcio::Environment::new(thread_count)));
       let env2 = env.clone();
-      let channel = Resettable::new(move || {
-        let builder = grpcio::ChannelBuilder::new(env2.get());
-        if let Some(ref root_ca_certs) = root_ca_certs {
-          let creds = grpcio::ChannelCredentialsBuilder::new()
-            .root_cert(root_ca_certs.clone())
-            .build();
-          builder.secure_connect(&cas_address, creds)
-        } else {
-          builder.connect(&cas_address)
-        }
+      let serverset = Resettable::new(move || {
+        let channels = cas_addresses
+          .iter()
+          .map(|cas_address| {
+            let builder = grpcio::ChannelBuilder::new(env2.get());
+            if let Some(ref root_ca_certs) = root_ca_certs {
+              let creds = grpcio::ChannelCredentialsBuilder::new()
+                .root_cert(root_ca_certs.clone())
+                .build();
+              builder.secure_connect(cas_address, creds)
+            } else {
+              builder.connect(cas_address)
+            }
+          }).collect();
+
+        Serverset::new(channels, backoff_config).map(Arc::new)
       });
 
-      ByteStore {
+      // Force evaluation so that Serverset config errors are eagerly reported.
+      serverset.get()?;
+
+      Ok(ByteStore {
         instance_name,
         chunk_size_bytes,
         upload_timeout,
         env,
-        channel,
+        serverset,
         authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
-      }
+      })
     }
 
     pub fn with_reset<F>(&self, f: F)
     where
       F: FnOnce() -> (),
     {
-      self.channel.with_reset(|| self.env.with_reset(f))
+      self.serverset.with_reset(|| self.env.with_reset(f))
     }
 
     fn call_option(&self) -> grpcio::CallOption {
@@ -1609,8 +1624,17 @@ mod remote {
       call_option
     }
 
-    fn byte_stream_client(&self) -> bazel_protos::bytestream_grpc::ByteStreamClient {
-      bazel_protos::bytestream_grpc::ByteStreamClient::new(self.channel.get())
+    fn get_byte_stream_client(
+      &self,
+    ) -> (
+      bazel_protos::bytestream_grpc::ByteStreamClient,
+      Box<Fn(serverset::Health) + Send + Sync>,
+    ) {
+      let (channel, callback) = self.serverset.get().unwrap().next();
+      (
+        bazel_protos::bytestream_grpc::ByteStreamClient::new(channel),
+        callback,
+      )
     }
 
     pub fn store_bytes(&self, bytes: Bytes) -> BoxFuture<Digest, String> {
@@ -1625,16 +1649,16 @@ mod remote {
         fingerprint,
         bytes.len()
       );
-      let client = self.byte_stream_client();
-      match client
-        .write_opt(self.call_option().timeout(self.upload_timeout))
-        .map(|v| (v, client))
-      {
-        Err(err) => future::err(format!(
-          "Error attempting to connect to upload fingerprint {}: {:?}",
-          fingerprint, err
-        )).to_boxed(),
-        Ok(((sender, receiver), client)) => {
+      let (client, callback) = self.get_byte_stream_client();
+      match client.write_opt(self.call_option().timeout(self.upload_timeout)) {
+        Err(err) => {
+          callback(serverset::Health::Unhealthy);
+          future::err(format!(
+            "Error attempting to connect to upload fingerprint {}: {:?}",
+            fingerprint, err
+          )).to_boxed()
+        }
+        Ok((sender, receiver)) => {
           let chunk_size_bytes = self.chunk_size_bytes;
           let stream =
             futures::stream::unfold::<_, _, futures::future::FutureResult<_, grpcio::Error>, _>(
@@ -1670,6 +1694,10 @@ mod remote {
                   fingerprint, e
                 )
               })
+            }).map_err(move |e| {
+              // TODO: This should also callback healthy if appropriate
+              callback(serverset::Health::Unhealthy);
+              e
             }).and_then(move |received| {
               if received.get_committed_size() == len as i64 {
                 Ok(Digest(fingerprint, len))
@@ -1692,7 +1720,7 @@ mod remote {
       digest: Digest,
       f: F,
     ) -> BoxFuture<Option<T>, String> {
-      let client = self.byte_stream_client();
+      let (client, callback) = self.get_byte_stream_client();
       match client
         .read_opt(
           &{
@@ -1720,7 +1748,10 @@ mod remote {
                 bytes.extend_from_slice(&r.data);
                 future::ok::<_, grpcio::Error>(bytes)
               }),
-            ).map(|(_client, bytes)| Some(bytes.freeze()))
+            ).map(|(client, bytes)| {
+              std::mem::drop(client);
+              Some(bytes.freeze())
+            }).then(move |result| ByteStore::call_health_callback(callback, result))
             .or_else(|e| match e {
               grpcio::Error::RpcFailure(grpcio::RpcStatus {
                 status: grpcio::RpcStatusCode::NotFound,
@@ -1755,8 +1786,12 @@ mod remote {
       for digest in digests {
         request.mut_blob_digests().push(digest.into());
       }
-      bazel_protos::remote_execution_grpc::ContentAddressableStorageClient::new(self.channel.get())
-        .find_missing_blobs_opt(&request, self.call_option())
+
+      let (channel, callback) = self.serverset.get().unwrap().next();
+      let client =
+        bazel_protos::remote_execution_grpc::ContentAddressableStorageClient::new(channel);
+      let result = client.find_missing_blobs_opt(&request, self.call_option());
+      ByteStore::call_health_callback(callback, result)
         .map_err(|err| {
           format!(
             "Error from server in response to find_missing_blobs_request: {:?}",
@@ -1769,6 +1804,21 @@ mod remote {
             .map(|digest| digest.into())
             .collect()
         })
+    }
+
+    fn call_health_callback<T>(
+      callback: Box<Fn(serverset::Health)>,
+      result: grpcio::Result<T>,
+    ) -> grpcio::Result<T> {
+      let health = match result {
+        Err(grpcio::Error::RpcFailure(grpcio::RpcStatus {
+          status: grpcio::RpcStatusCode::Unavailable,
+          ..
+        })) => serverset::Health::Unhealthy,
+        _ => serverset::Health::Healthy,
+      };
+      callback(health);
+      result
     }
   }
 
@@ -1921,14 +1971,15 @@ mod remote {
       let cas = StubCAS::empty();
 
       let store = ByteStore::new(
-        cas.address(),
+        vec![cas.address()],
         None,
         None,
         None,
         1,
         10 * 1024,
         Duration::from_secs(5),
-      );
+        super::super::tests::backoff_config(),
+      ).unwrap();
 
       let all_the_henries = big_file_bytes();
 
@@ -1996,14 +2047,15 @@ mod remote {
     #[test]
     fn write_connection_error() {
       let store = ByteStore::new(
-        "doesnotexist.example".to_owned(),
+        vec!["doesnotexist.example".to_owned()],
         None,
         None,
         None,
         1,
         10 * 1024 * 1024,
         Duration::from_secs(1),
-      );
+        super::super::tests::backoff_config(),
+      ).unwrap();
       let error = store
         .store_bytes(TestData::roland().bytes())
         .wait()
@@ -2059,14 +2111,15 @@ mod remote {
 
     fn new_byte_store(cas: &StubCAS) -> ByteStore {
       ByteStore::new(
-        cas.address(),
+        vec![cas.address()],
         None,
         None,
         None,
         1,
         10 * 1024 * 1024,
         Duration::from_secs(1),
-      )
+        super::super::tests::backoff_config(),
+      ).unwrap()
     }
 
     pub fn load_file_bytes(store: &ByteStore, digest: Digest) -> Result<Option<Bytes>, String> {
@@ -2092,12 +2145,13 @@ mod remote {
 
 #[cfg(test)]
 mod tests {
-  use super::{local, EntryType, FileContent, Store, UploadSummary};
+  use super::{local, BackoffConfig, EntryType, FileContent, Store, UploadSummary};
 
   use bazel_protos;
   use bytes::Bytes;
   use digest::{Digest as DigestTrait, FixedOutput};
   use futures::Future;
+  use grpcio;
   use hashing::{Digest, Fingerprint};
   use mock::StubCAS;
   use pool::ResettablePool;
@@ -2180,13 +2234,14 @@ mod tests {
     Store::with_remote(
       dir,
       Arc::new(ResettablePool::new("test-pool-".to_string())),
-      cas_address,
+      vec![cas_address],
       None,
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).unwrap()
   }
 
@@ -2883,13 +2938,14 @@ mod tests {
     let store_with_remote = Store::with_remote(
       dir.path(),
       Arc::new(ResettablePool::new("test-pool-".to_string())),
-      cas.address(),
+      vec![cas.address()],
       Some("dark-tower".to_owned()),
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).unwrap();
 
     store_with_remote
@@ -2909,13 +2965,14 @@ mod tests {
     let store_with_remote = Store::with_remote(
       dir.path(),
       Arc::new(ResettablePool::new("test-pool-".to_string())),
-      cas.address(),
+      vec![cas.address()],
       Some("dark-tower".to_owned()),
       None,
       None,
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).unwrap();
 
     assert_eq!(
@@ -2952,13 +3009,14 @@ mod tests {
     let store_with_remote = Store::with_remote(
       dir.path(),
       Arc::new(ResettablePool::new("test-pool-".to_string())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       Some("Armory.Key".to_owned()),
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).unwrap();
 
     store_with_remote
@@ -2978,13 +3036,14 @@ mod tests {
     let store_with_remote = Store::with_remote(
       dir.path(),
       Arc::new(ResettablePool::new("test-pool-".to_string())),
-      cas.address(),
+      vec![cas.address()],
       None,
       None,
       Some("Armory.Key".to_owned()),
       1,
       10 * 1024 * 1024,
       Duration::from_secs(1),
+      backoff_config(),
     ).unwrap();
 
     assert_eq!(
@@ -3240,6 +3299,94 @@ mod tests {
     );
   }
 
+  #[test]
+  fn uses_multiple_servers() {
+    let cas1 = StubCAS::builder()
+      .file(&TestData::roland())
+      .file(&TestData::catnip())
+      .build();
+
+    let cas2 = StubCAS::builder()
+      .file(&TestData::roland())
+      .file(&TestData::catnip())
+      .build();
+
+    let dir = TempDir::new().unwrap();
+    let store_with_remote = Store::with_remote(
+      dir.path(),
+      Arc::new(ResettablePool::new("test-pool-".to_string())),
+      vec![cas1.address(), cas2.address()],
+      None,
+      None,
+      None,
+      1,
+      10 * 1024 * 1024,
+      Duration::from_secs(1),
+      backoff_config(),
+    ).unwrap();
+
+    assert_eq!(
+      store_with_remote
+        .load_file_bytes_with(TestData::roland().digest(), |b| b)
+        .wait(),
+      Ok(Some(TestData::roland().bytes()))
+    );
+    assert_eq!(
+      store_with_remote
+        .load_file_bytes_with(TestData::catnip().digest(), |b| b)
+        .wait(),
+      Ok(Some(TestData::catnip().bytes()))
+    );
+    assert_eq!(cas1.read_request_count(), 1);
+    assert_eq!(cas2.read_request_count(), 1);
+  }
+
+  #[test]
+  fn ignores_bad_server() {
+    // TODO: Make this test pass by adding a retry loop in all server requests
+    let cas_healthy = StubCAS::builder()
+      .file(&TestData::roland())
+      .file(&TestData::catnip())
+      .build();
+
+    let cas_unhealthy = StubCAS::builder()
+      .always_errors(grpcio::RpcStatus::new(
+        grpcio::RpcStatusCode::Unavailable,
+        Some("StubCAS configured to be unavailable".to_owned()),
+      )).build();
+
+    let dir = TempDir::new().unwrap();
+    let store_with_remote = Store::with_remote(
+      dir.path(),
+      Arc::new(ResettablePool::new("test-pool-".to_string())),
+      vec![cas_unhealthy.address(), cas_healthy.address()],
+      None,
+      None,
+      None,
+      1,
+      10 * 1024 * 1024,
+      Duration::from_secs(1),
+      backoff_config(),
+    ).unwrap();
+
+    assert_eq!(
+      store_with_remote
+        .load_file_bytes_with(TestData::roland().digest(), |b| b)
+        .wait(),
+      Ok(Some(TestData::roland().bytes()))
+    );
+    assert_eq!(
+      store_with_remote
+        .load_file_bytes_with(TestData::catnip().digest(), |b| b)
+        .wait(),
+      Ok(Some(TestData::catnip().bytes()))
+    );
+    assert!(
+      cas_unhealthy.read_request_count() > 0,
+      "Expected read requests to unhealthy CAS but got none"
+    );
+  }
+
   fn assert_same_filecontents(left: Vec<FileContent>, right: Vec<FileContent>) {
     assert_eq!(
       left.len(),
@@ -3406,5 +3553,13 @@ mod tests {
         uploaded_file_bytes: testdir.digest().1 + testcatnip.digest().1
       }
     );
+  }
+
+  pub fn backoff_config() -> BackoffConfig {
+    BackoffConfig {
+      initial_lame: std::time::Duration::from_millis(10),
+      backoff_ratio: 2.0,
+      max_lame: std::time::Duration::from_secs(20),
+    }
   }
 }

@@ -104,6 +104,8 @@ fn main() {
       Arg::with_name("cas-server")
         .long("cas-server")
         .takes_value(true)
+          .multiple(true)
+          .number_of_values(1)
         .help("The host:port of the gRPC CAS server to connect to."),
     )
       .arg(
@@ -182,8 +184,8 @@ fn main() {
   let pool = Arc::new(fs::ResettablePool::new("process-executor-".to_owned()));
   let server_arg = args.value_of("server");
   let remote_instance_arg = args.value_of("remote-instance-name").map(str::to_owned);
-  let store = match (server_arg, args.value_of("cas-server")) {
-    (Some(_server), Some(cas_server)) => {
+  let store = match (server_arg, args.values_of("cas-server")) {
+    (Some(_server), Some(cas_servers)) => {
       let chunk_size =
         value_t!(args.value_of("upload-chunk-bytes"), usize).expect("Bad upload-chunk-bytes flag");
 
@@ -202,13 +204,18 @@ fn main() {
       fs::Store::with_remote(
         local_store_path,
         pool.clone(),
-        cas_server.to_owned(),
+        cas_servers.map(str::to_owned).collect(),
         remote_instance_arg.clone(),
         root_ca_certs,
         oauth_bearer_token,
         1,
         chunk_size,
         Duration::from_secs(30),
+        fs::BackoffConfig {
+          initial_lame: std::time::Duration::from_secs(1),
+          backoff_ratio: 1.2,
+          max_lame: std::time::Duration::from_secs(20),
+        },
       )
     }
     (None, None) => fs::Store::local_only(local_store_path, pool.clone()),
