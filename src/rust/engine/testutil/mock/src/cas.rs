@@ -23,7 +23,7 @@ pub struct StubCAS {
 }
 
 pub struct StubCASBuilder {
-  always_errors: bool,
+  always_errors: Option<grpcio::RpcStatus>,
   chunk_size_bytes: Option<usize>,
   content: HashMap<Fingerprint, Bytes>,
   port: Option<u16>,
@@ -34,7 +34,7 @@ pub struct StubCASBuilder {
 impl StubCASBuilder {
   pub fn new() -> Self {
     StubCASBuilder {
-      always_errors: false,
+      always_errors: None,
       chunk_size_bytes: None,
       content: HashMap::new(),
       port: None,
@@ -78,8 +78,11 @@ impl StubCASBuilder {
     self
   }
 
-  pub fn always_errors(mut self) -> Self {
-    self.always_errors = true;
+  pub fn always_errors(mut self, error: grpcio::RpcStatus) -> Self {
+    if self.always_errors.is_some() {
+      panic!("Can't set always_errors twice");
+    }
+    self.always_errors = Some(error);
     self
   }
 
@@ -129,7 +132,7 @@ impl StubCAS {
     chunk_size_bytes: usize,
     blobs: HashMap<Fingerprint, Bytes>,
     port: u16,
-    always_errors: bool,
+    always_errors: Option<grpcio::RpcStatus>,
     instance_name: Option<String>,
     required_auth_token: Option<String>,
   ) -> StubCAS {
@@ -169,7 +172,11 @@ impl StubCAS {
   }
 
   pub fn always_errors() -> StubCAS {
-    StubCAS::builder().always_errors().build()
+    StubCAS::builder()
+      .always_errors(grpcio::RpcStatus::new(
+        grpcio::RpcStatusCode::Internal,
+        Some("StubCAS is configured to always fail".to_owned()),
+      )).build()
   }
 
   ///
@@ -190,7 +197,7 @@ pub struct StubCASResponder {
   chunk_size_bytes: usize,
   instance_name: Option<String>,
   blobs: Arc<Mutex<HashMap<Fingerprint, Bytes>>>,
-  always_errors: bool,
+  always_errors: Option<grpcio::RpcStatus>,
   required_auth_header: Option<String>,
   pub read_request_count: Arc<Mutex<usize>>,
   pub write_message_sizes: Arc<Mutex<Vec<usize>>>,
@@ -252,11 +259,8 @@ impl StubCASResponder {
         Some(format!("Bad digest {}: {}", digest, e)),
       )
     })?;
-    if self.always_errors {
-      return Err(grpcio::RpcStatus::new(
-        grpcio::RpcStatusCode::Internal,
-        Some("StubCAS is configured to always fail".to_owned()),
-      ));
+    if let Some(ref error) = self.always_errors {
+      return Err(error.clone());
     }
     let blobs = self.blobs.lock();
     let maybe_bytes = blobs.get(&fingerprint);
@@ -330,7 +334,7 @@ impl bazel_protos::bytestream_grpc::ByteStream for StubCASResponder {
   ) {
     check_auth!(self, ctx, sink);
 
-    let always_errors = self.always_errors;
+    let always_errors = self.always_errors.clone();
     let write_message_sizes = self.write_message_sizes.clone();
     let blobs = self.blobs.clone();
     let instance_name = self.instance_name();
@@ -426,11 +430,8 @@ impl bazel_protos::bytestream_grpc::ByteStream for StubCASResponder {
                 ));
               }
 
-              if always_errors {
-                return Err(grpcio::RpcStatus::new(
-                  grpcio::RpcStatusCode::Internal,
-                  Some("StubCAS is configured to always fail".to_owned()),
-                ));
+              if let Some(error) = always_errors {
+                return Err(error);
               }
 
               {
@@ -472,11 +473,8 @@ impl bazel_protos::remote_execution_grpc::ContentAddressableStorage for StubCASR
   ) {
     check_auth!(self, ctx, sink);
 
-    if self.always_errors {
-      sink.fail(grpcio::RpcStatus::new(
-        grpcio::RpcStatusCode::Internal,
-        Some("StubCAS is configured to always fail".to_owned()),
-      ));
+    if let Some(ref error) = self.always_errors {
+      sink.fail(error.clone());
       return;
     }
     if req.instance_name != self.instance_name() {
