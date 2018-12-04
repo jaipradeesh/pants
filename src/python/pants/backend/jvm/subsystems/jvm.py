@@ -54,7 +54,9 @@ class JVM(Subsystem):
 
     Thus named because get_options() already exists (and returns this object's Pants options).
     """
-    ret = []
+    # Always bump MaxFDLimit - this means that Java will listen to the environmental FD limit,
+    # rather than imposing its own. This should just be what the JVM does by default. Boo.
+    ret = ["-XX:-MaxFDLimit"]
     for opt in self.get_options().options:
       ret.extend(safe_shlex_split(opt))
 
