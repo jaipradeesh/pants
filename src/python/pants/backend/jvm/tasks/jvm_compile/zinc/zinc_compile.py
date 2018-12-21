@@ -30,8 +30,8 @@ from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
 from pants.base.hash_utils import hash_file
 from pants.base.workunit import WorkUnitLabel
-from pants.engine.fs import DirectoryToMaterialize
-from pants.engine.isolated_process import ExecuteProcessRequest
+from pants.engine.fs import Digest, DirectoryToMaterialize
+from pants.engine.isolated_process import ExecuteProcessRequest, ProcessExecutionFailure
 from pants.java.distribution.distribution import DistributionLocator
 from pants.util.contextutil import open_zip
 from pants.util.dirutil import fast_relpath, safe_open
@@ -209,7 +209,7 @@ class BaseZincCompile(JvmCompile):
     # Validate zinc options.
     ZincCompile.validate_arguments(self.context.log, self.get_options().whitelisted_args,
                                    self._args)
-    if self.execution_strategy == self.HERMETIC:
+    if self.execution_strategy in {self.HERMETIC, self.HERMETIC_WITH_NAILGUN}:
       # TODO: Make incremental compiles work. See:
       # hermetically https://github.com/pantsbuild/pants/issues/6517
       if self.get_options().incremental:
@@ -296,7 +296,7 @@ class BaseZincCompile(JvmCompile):
     if self.get_options().capture_classpath:
       self._record_compile_classpath(absolute_classpath, ctx.target, ctx.classes_dir.path)
 
-    self._verify_zinc_classpath(absolute_classpath, allow_dist=(self.execution_strategy != self.HERMETIC))
+    self._verify_zinc_classpath(absolute_classpath, allow_dist=(self.execution_strategy not in {self.HERMETIC, self.HERMETIC_WITH_NAILGUN}))
     # TODO: Investigate upstream_analysis for hermetic compiles
     self._verify_zinc_classpath(upstream_analysis.keys())
 
@@ -318,7 +318,7 @@ class BaseZincCompile(JvmCompile):
 
     zinc_args = []
     zinc_args.extend([
-      '-log-level', self.get_options().level,
+      '-log-level', 'warn',
       '-analysis-cache', analysis_cache,
       '-classpath', ':'.join(relative_classpath),
       '-d', classes_dir,
@@ -328,6 +328,8 @@ class BaseZincCompile(JvmCompile):
 
     compiler_bridge_classpath_entry = self._zinc.compile_compiler_bridge(self.context)
     zinc_args.extend(['-compiled-bridge-jar', relative_to_exec_root(compiler_bridge_classpath_entry.path)])
+    zinc_args.extend(['-scala-compiler'] + [jar for jar in scala_path if 'scala-compiler' in jar])
+    zinc_args.extend(['-scala-library'] + [jar for jar in scala_path if 'scala-library' in jar])
     zinc_args.extend(['-scala-path', ':'.join(scala_path)])
 
     zinc_args.extend(self._javac_plugin_args(javac_plugin_map))
@@ -387,7 +389,7 @@ class BaseZincCompile(JvmCompile):
         fp.write(arg)
         fp.write(b'\n')
 
-    if self.execution_strategy == self.HERMETIC:
+    if self.execution_strategy in {self.HERMETIC, self.HERMETIC_WITH_NAILGUN}:
       zinc_relpath = fast_relpath(self._zinc.zinc, get_buildroot())
 
       snapshots = [
@@ -412,12 +414,16 @@ class BaseZincCompile(JvmCompile):
       )
 
       merged_input_digest = self.context._scheduler.merge_directories(
-        tuple(s.directory_digest for s in (snapshots)) + directory_digests
+        tuple(s.directory_digest for s in (snapshots)) + directory_digests + (Digest("a776d0d9c4281410e800232083c84622ff33943013905b036956b4a6c160413f", 80),)
       )
 
       # TODO: Extract something common from Executor._create_command to make the command line
       # TODO: Lean on distribution for the bin/java appending here
-      argv = tuple(['.jdk/bin/java'] + jvm_options + ['-cp', zinc_relpath, Zinc.ZINC_COMPILE_MAIN] + zinc_args)
+      if self.execution_strategy == self.HERMETIC:
+        argv = tuple(['.jdk/bin/java'] + jvm_options + ['-cp', zinc_relpath, Zinc.ZINC_COMPILE_MAIN] + zinc_args)
+      else:
+        argv = tuple(['./ng', Zinc.ZINC_COMPILE_MAIN, '--nailgun-compiler-cache-dir', '/tmp/compiler-cache'] + zinc_args)
+
       req = ExecuteProcessRequest(
         argv=argv,
         input_files=merged_input_digest,
@@ -427,7 +433,20 @@ class BaseZincCompile(JvmCompile):
         # Since this is always hermetic, we need to use `underlying_dist`
         jdk_home=text_type(self._zinc.underlying_dist.home),
       )
-      res = self.context.execute_process_synchronously_or_raise(req, self.name(), [WorkUnitLabel.COMPILER])
+
+      retry_iteration = 0
+
+      while True:
+        try:
+          res = self.context.execute_process_synchronously_or_raise(req, self.name(), [WorkUnitLabel.COMPILER])
+          break
+        except ProcessExecutionFailure as e:
+          if e.exit_code == 227:
+            env = {'_retry_iteration': '{}'.format(retry_iteration)}
+            retry_iteration += 1
+            req = req.copy(env=env)
+            continue
+          raise
 
       # TODO: Materialize as a batch in do_compile or somewhere
       self.context._scheduler.materialize_directories((

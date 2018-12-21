@@ -23,11 +23,12 @@ class NailgunTaskBase(JvmToolTaskMixin, TaskBase):
   NAILGUN = 'nailgun'
   SUBPROCESS = 'subprocess'
   HERMETIC = 'hermetic'
+  HERMETIC_WITH_NAILGUN = 'hermetic-with-nailgun'
 
   @classmethod
   def register_options(cls, register):
     super(NailgunTaskBase, cls).register_options(register)
-    register('--execution-strategy', choices=[cls.NAILGUN, cls.SUBPROCESS, cls.HERMETIC], default=cls.NAILGUN,
+    register('--execution-strategy', choices=[cls.NAILGUN, cls.SUBPROCESS, cls.HERMETIC, cls.HERMETIC_WITH_NAILGUN], default=cls.NAILGUN,
              help='If set to nailgun, nailgun will be enabled and repeated invocations of this '
                   'task will be quicker. If set to subprocess, then the task will be run without nailgun.')
     register('--nailgun-timeout-seconds', advanced=True, default=10, type=float,

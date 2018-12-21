@@ -400,7 +400,7 @@ class JvmCompile(CompilerOptionSetsMixin, NailgunTaskBase):
     invalid_targets = [vt.target for vt in invalidation_check.invalid_vts]
     valid_targets = [vt.target for vt in invalidation_check.all_vts if vt.valid]
 
-    if self.execution_strategy == self.HERMETIC:
+    if self.execution_strategy in {self.HERMETIC, self.HERMETIC_WITH_NAILGUN}:
       self._set_direcotry_digests_for_valid_target_classpath_directories(valid_targets, compile_contexts)
 
     for valid_target in valid_targets:
