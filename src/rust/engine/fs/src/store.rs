@@ -6,6 +6,7 @@ use bytes::Bytes;
 use dirs;
 use futures::{future, Future};
 use hashing::Digest;
+use log::debug;
 use protobuf::Message;
 use serde_derive::Serialize;
 use std::collections::HashMap;
@@ -333,11 +334,13 @@ impl Store {
           return future::ok((ingested_digests.keys().cloned().collect(), ingested_digests))
             .to_boxed();
         }
+        debug!("Checking for missing digests");
         let request = remote.find_missing_blobs_request(ingested_digests.keys());
         let f = remote.list_missing_digests(request);
         f.map(move |digests_to_upload| (digests_to_upload, ingested_digests))
           .to_boxed()
       }).and_then(move |(digests_to_upload, ingested_digests)| {
+        debug!("Checked for missing digests");
         future::join_all(
           digests_to_upload
             .into_iter()
@@ -357,13 +360,15 @@ impl Store {
         let ingested_file_sizes = ingested_digests.iter().map(|(digest, _)| digest.1);
         let uploaded_file_sizes = uploaded_digests.iter().map(|digest| digest.1);
 
-        UploadSummary {
+        let us = UploadSummary {
           ingested_file_count: ingested_file_sizes.len(),
           ingested_file_bytes: ingested_file_sizes.sum(),
           uploaded_file_count: uploaded_file_sizes.len(),
           uploaded_file_bytes: uploaded_file_sizes.sum(),
           upload_wall_time: start_time.elapsed(),
-        }
+        };
+        debug!("Done ensuring remotes: {:?}", us);
+        us
       }).to_boxed()
   }
 
@@ -1669,6 +1674,7 @@ mod remote {
   use futures::{self, future, Future, IntoFuture, Sink, Stream};
   use grpcio;
   use hashing::{Digest, Fingerprint};
+  use log::debug;
   use serverset::{Retry, Serverset};
   use sha2::Sha256;
   use std::cmp::min;
@@ -1725,7 +1731,7 @@ mod remote {
         chunk_size_bytes,
         upload_timeout,
         // TODO: Parameterise this
-        rpc_attempts: 3,
+        rpc_attempts: 10,
         env,
         serverset,
         authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
@@ -1794,6 +1800,7 @@ mod remote {
       let fingerprint = Fingerprint::from_bytes_unsafe(hasher.fixed_result().as_slice());
       let len = bytes.len();
       let digest = Digest(fingerprint, len);
+      debug!("Uploading {:?}", digest);
       let resource_name = format!(
         "{}/uploads/{}/blobs/{}/{}",
         self.instance_name.clone().unwrap_or_default(),
@@ -1850,6 +1857,7 @@ mod remote {
                   })
                 }).and_then(move |received| {
                   if received.get_committed_size() == len as i64 {
+                    debug!("Done uploading {:?}", digest);
                     Ok(digest)
                   } else {
                     Err(format!(

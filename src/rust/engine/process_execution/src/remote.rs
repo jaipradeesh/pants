@@ -13,7 +13,7 @@ use futures::{future, Future, Stream};
 use futures_timer::Delay;
 use grpcio;
 use hashing::{Digest, Fingerprint};
-use log::{debug, trace, warn};
+use log::{debug, warn};
 use protobuf::{self, Message, ProtobufEnum};
 use sha2::Sha256;
 use time;
@@ -156,13 +156,13 @@ impl super::CommandRunner for CommandRunner {
           .store_proto_locally(&command)
           .join(self.store_proto_locally(&action))
           .and_then(move |(command_digest, action_digest)| {
+            debug!("Uploading files for remote execution");
             store2.ensure_remote_has_recursive(vec![command_digest, action_digest, input_files])
           }).and_then(move |summary| {
             history.current_attempt += summary;
-            trace!(
+            debug!(
               "Executing remotely request: {:?} (command: {:?})",
-              execute_request,
-              command
+              execute_request, command
             );
             command_runner
               .oneshot_execute(&execute_request)
@@ -191,10 +191,9 @@ impl super::CommandRunner for CommandRunner {
                         current_attempt,
                       } = history;
 
-                      trace!(
+                      debug!(
                         "Server reported missing digests ({:?}); trying to upload: {:?}",
-                        current_attempt,
-                        missing_digests,
+                        current_attempt, missing_digests,
                       );
 
                       attempts.push(current_attempt);
@@ -362,7 +361,7 @@ impl CommandRunner {
     operation_or_status: OperationOrStatus,
     attempts: &mut ExecutionHistory,
   ) -> BoxFuture<FallibleExecuteProcessResult, ExecutionError> {
-    trace!("Got operation response: {:?}", operation_or_status);
+    debug!("Got operation response: {:?}", operation_or_status);
 
     let status = match operation_or_status {
       OperationOrStatus::Operation(mut operation) => {
@@ -385,7 +384,7 @@ impl CommandRunner {
             .merge_from_bytes(operation.get_response().get_value())
             .map_err(|e| ExecutionError::Fatal(format!("Invalid ExecuteResponse: {:?}", e)))
         );
-        trace!("Got (nested) execute response: {:?}", execute_response);
+        debug!("Got (nested) execute response: {:?}", execute_response);
 
         if execute_response.get_result().has_execution_metadata() {
           let metadata = execute_response.get_result().get_execution_metadata();
