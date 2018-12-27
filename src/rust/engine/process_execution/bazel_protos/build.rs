@@ -117,7 +117,7 @@ fn generate_for_tower(merged_root: PathBuf) {
         &[merged_root],
       ).unwrap_or_else(|e| panic!("protobuf compilation failed: {}", e));
 
-  let out_dir = PathBuf::from("src/gen/for_tower");
+  let out_dir = PathBuf::from("src/gen2/tower");
   if out_dir.exists() {
     std::fs::remove_dir_all(&out_dir).unwrap();
   }
