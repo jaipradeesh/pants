@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate prost_derive;
+
 use hashing;
 use protobuf;
 

@@ -10,7 +10,11 @@ bytes = "0.4.5"
 futures = "^0.1.16"
 grpcio = { git = "https://github.com/pantsbuild/grpc-rs.git", rev = "4dfafe9355dc996d7d0702e7386a6fedcd9734c0", default_features = false, features = ["protobuf-codec"] }
 hashing = { path = "../../hashing" }
+prost = "0.4"
+prost-derive = "0.4"
+prost-types = "0.4"
 protobuf = { version = "2.0.4", features = ["with-bytes"] }
+tower-grpc = { git = "https://github.com/tower-rs/tower-grpc.git", rev = "a5959c924209bce0c41ffe6238db0707435cf099", features = ["prost"] }
 
 [build-dependencies]
 build_utils = { path = "../../build_utils" }

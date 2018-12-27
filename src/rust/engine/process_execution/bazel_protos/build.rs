@@ -117,11 +117,17 @@ fn generate_for_tower(merged_root: PathBuf) {
         &[merged_root],
       ).unwrap_or_else(|e| panic!("protobuf compilation failed: {}", e));
 
-  // TODO: File a bug
+  let out_dir = PathBuf::from("src/gen/tower");
+  if out_dir.exists() {
+    std::fs::remove_dir_all(&out_dir).unwrap();
+  }
+
+  // TODO: File a bug about ()s
   for f in walkdir::WalkDir::new(std::env::var("OUT_DIR").unwrap()) {
     let f = f.unwrap();
-    if f.path().extension() == Some("rs".as_ref()) {
-      let contents: Vec<_> = std::fs::read_to_string(f.path())
+    let src = f.path();
+    if src.extension() == Some("rs".as_ref()) {
+      let mut contents: Vec<_> = std::fs::read_to_string(f.path())
           .unwrap()
           .lines()
           .map(|line| {
@@ -131,7 +137,32 @@ fn generate_for_tower(merged_root: PathBuf) {
               line.to_owned()
             }
           }).collect();
-      std::fs::write(f.path(), contents.join("\n")).unwrap();
+
+      let mut parts: Vec<_> = f.path().file_name().unwrap().to_str().unwrap().split('.').collect();
+      // pop .rs
+      parts.pop();
+
+      let mut dst = out_dir.clone();
+      for part in parts {
+        dst.push(part);
+        if !dst.exists() {
+          std::fs::create_dir_all(&dst).unwrap();
+          let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dst.parent().unwrap().join("mod.rs"))
+            .unwrap();
+          writeln!(f, "pub mod {};", part).unwrap();
+        }
+
+      }
+      dst = dst.join("mod.rs");
+
+      if dst == out_dir.join("google").join("protobuf").join("mod.rs") {
+        contents.push("pub type Empty = ();".to_owned());
+      }
+
+      std::fs::write(dst, contents.join("\n")).unwrap();
     }
   }
 }
