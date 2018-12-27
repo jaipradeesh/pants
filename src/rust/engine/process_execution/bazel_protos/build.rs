@@ -13,10 +13,10 @@ option (rustproto.carllerche_bytes_for_bytes_all) = true;
 fn main() {
   let build_root = BuildRoot::find().unwrap();
   let thirdpartyprotobuf = build_root.join("3rdparty/protobuf");
-  println!(
-    "cargo:rerun-if-changed={}",
-    thirdpartyprotobuf.to_str().unwrap()
-  );
+  for file in walkdir::WalkDir::new(&thirdpartyprotobuf) {
+    println!("cargo:rerun-if-changed={}", file.unwrap().path().to_str().unwrap());
+  }
+
 
   let amended_proto_root = tempfile::TempDir::new().unwrap();
   for f in &["bazelbuild_remote-apis", "googleapis"] {
