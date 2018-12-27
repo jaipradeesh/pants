@@ -1,6 +1,6 @@
 use hashing;
 
-impl<'a> From<&'a hashing::Digest> for super::remote_execution::Digest {
+impl<'a> From<&'a hashing::Digest> for crate::remote_execution::Digest {
   fn from(d: &hashing::Digest) -> Self {
     let mut digest = super::remote_execution::Digest::new();
     digest.set_hash(d.0.to_hex());
@@ -9,7 +9,7 @@ impl<'a> From<&'a hashing::Digest> for super::remote_execution::Digest {
   }
 }
 
-impl<'a> From<&'a hashing::Digest> for super::tower::build::bazel::remote::execution::v2::Digest {
+impl<'a> From<&'a hashing::Digest> for crate::for_tower::build::bazel::remote::execution::v2::Digest {
   fn from(d: &hashing::Digest) -> Self {
     Self {
       hash: d.0.to_hex(),
