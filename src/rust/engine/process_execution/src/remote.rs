@@ -17,6 +17,7 @@ use log::{debug, trace, warn};
 use protobuf::{self, Message, ProtobufEnum};
 use sha2::Sha256;
 use time;
+use tokio::net::tcp::{ConnectFuture, TcpStream};
 
 use super::{ExecuteProcessRequest, ExecutionStats, FallibleExecuteProcessResult};
 use std;
@@ -40,7 +41,8 @@ pub struct CommandRunner {
   authorization_header: Option<String>,
   channel: grpcio::Channel,
   env: Arc<grpcio::Environment>,
-  execution_client: Arc<bazel_protos::remote_execution_grpc::ExecutionClient>,
+  address: String,
+  conn: Arc<tower_h2::client::Connect<Address, tokio::runtime::TaskExecutor, bazel_protos::tower::build::bazel::remote::execution::v2::server::execution::ResponseBody<bazel_protos::tower::build::bazel::remote::execution::v2::client::Execution>>>,
   operations_client: Arc<bazel_protos::operations_grpc::OperationsClient>,
   store: Store,
   futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
@@ -72,11 +74,13 @@ impl CommandRunner {
   // behavior.
   fn oneshot_execute(
     &self,
-    execute_request: &Arc<bazel_protos::remote_execution::ExecuteRequest>,
+    execute_request: &Arc<bazel_protos::tower::build::bazel::remote::execution::v2::ExecuteRequest>,
   ) -> BoxFuture<OperationOrStatus, String> {
     let stream = try_future!(self
-      .execution_client
-      .execute_opt(&execute_request, self.call_option())
+      .conn
+      .map(|conn| tower_http::add_origin::Builder::new().uri(self.address.parse().unwrap()).build(conn).unwrap())
+      .map(|conn| bazel_protos::tower::build::bazel::remote::execution::v2::client::Execution::new(conn))
+      .and_then(|client| client.execute(execute_request))
       .map_err(rpcerror_to_string));
     stream
       .take(1)
@@ -293,6 +297,18 @@ impl super::CommandRunner for CommandRunner {
   }
 }
 
+struct Address(String);
+
+impl tokio_connect::Connect for Address {
+  type Connected = TcpStream;
+  type Error = ::std::io::Error;
+  type Future = ConnectFuture;
+
+  fn connect(&self) -> Self::Future {
+    TcpStream::connect(&self.0.into())
+  }
+}
+
 impl CommandRunner {
   const BACKOFF_INCR_WAIT_MILLIS: u64 = 500;
   const BACKOFF_MAX_WAIT_MILLIS: u64 = 5000;
@@ -306,6 +322,7 @@ impl CommandRunner {
     oauth_bearer_token: Option<String>,
     thread_count: usize,
     store: Store,
+    executor: tokio::runtime::TaskExecutor,
     futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
   ) -> CommandRunner {
     let env = Arc::new(grpcio::Environment::new(thread_count));
@@ -323,12 +340,12 @@ impl CommandRunner {
         builder.connect(address)
       }
     };
-    let execution_client = Arc::new(bazel_protos::remote_execution_grpc::ExecutionClient::new(
-      channel.clone(),
-    ));
     let operations_client = Arc::new(bazel_protos::operations_grpc::OperationsClient::new(
       channel.clone(),
     ));
+
+
+    let conn = Arc::new(tower_h2::client::Connect::new(Address(address.to_owned()), Default::default(), executor));
 
     CommandRunner {
       cache_key_gen_version,
@@ -336,7 +353,8 @@ impl CommandRunner {
       authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
       channel,
       env,
-      execution_client,
+      conn,
+      address: address.to_owned(),
       operations_client,
       store,
       futures_timer_thread,
@@ -738,7 +756,7 @@ fn make_execute_request(
   (
     bazel_protos::remote_execution::Action,
     bazel_protos::remote_execution::Command,
-    bazel_protos::remote_execution::ExecuteRequest,
+    bazel_protos::tower::build::bazel::remote::execution::v2::ExecuteRequest,
   ),
   String,
 > {
@@ -807,11 +825,14 @@ fn make_execute_request(
   action.set_command_digest((&digest(&command)?).into());
   action.set_input_root_digest((&req.input_files).into());
 
-  let mut execute_request = bazel_protos::remote_execution::ExecuteRequest::new();
-  if let Some(instance_name) = instance_name {
-    execute_request.set_instance_name(instance_name.clone());
-  }
-  execute_request.set_action_digest((&digest(&action)?).into());
+  let execute_request = bazel_protos::tower::build::bazel::remote::execution::v2::ExecuteRequest {
+    action_digest: Some((&digest(&action)?).into()),
+    execution_policy: None,
+    instance_name: instance_name.unwrap_or_default(),
+    results_cache_policy: None,
+    skip_cache_lookup: false,
+
+  };
 
   Ok((action, command, execute_request))
 }

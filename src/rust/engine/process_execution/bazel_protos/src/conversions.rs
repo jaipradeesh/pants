@@ -9,6 +9,15 @@ impl<'a> From<&'a hashing::Digest> for super::remote_execution::Digest {
   }
 }
 
+impl<'a> From<&'a hashing::Digest> for super::tower::build::bazel::remote::execution::v2::Digest {
+  fn from(d: &hashing::Digest) -> Self {
+    Self {
+      hash: d.0.to_hex(),
+      size_bytes: d.1 as i64,
+    }
+  }
+}
+
 impl<'a> From<&'a super::remote_execution::Digest> for Result<hashing::Digest, String> {
   fn from(d: &super::remote_execution::Digest) -> Self {
     hashing::Fingerprint::from_hex_string(d.get_hash())

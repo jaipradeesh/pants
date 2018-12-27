@@ -23,8 +23,12 @@ tempfile = "3"
 # TODO: Switch to a release once https://github.com/alexcrichton/futures-timer/pull/11 and https://github.com/alexcrichton/futures-timer/pull/12 merge
 futures-timer = { git = "https://github.com/pantsbuild/futures-timer", rev = "0b747e565309a58537807ab43c674d8951f9e5a0" }
 time = "0.1.40"
+tokio = "*"
 tokio-codec = "0.1"
+tokio-connect = { git = "https://github.com/carllerche/tokio-connect" }
 tokio-process = "0.2.1"
+tower-h2 = { git = "https://github.com/tower-rs/tower-h2"  }
+tower-http = { git = "https://github.com/tower-rs/tower-http"  }
 
 [dev-dependencies]
 mock = { path = "../testutil/mock" }
