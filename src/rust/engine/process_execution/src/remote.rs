@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem::drop;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bazel_protos;
@@ -22,6 +22,13 @@ use super::{ExecuteProcessRequest, ExecutionStats, FallibleExecuteProcessResult}
 use std;
 use std::cmp::min;
 
+use std::net::ToSocketAddrs;
+use tokio::executor::DefaultExecutor;
+use tokio::net::tcp::{ConnectFuture, TcpStream};
+use tower_grpc::Request;
+use tower_h2::client;
+use tower_util::MakeService;
+
 // Environment variable which is exclusively used for cache key invalidation.
 // This may be not specified in an ExecuteProcessRequest, and may be populated only by the
 // CommandRunner.
@@ -41,6 +48,7 @@ pub struct CommandRunner {
   channel: grpcio::Channel,
   env: Arc<grpcio::Environment>,
   execution_client: Arc<bazel_protos::remote_execution_grpc::ExecutionClient>,
+  conn: Arc<Mutex<bazel_protos::tower_protos::build::bazel::remote::execution::v2::client::Execution<tower_http::add_origin::AddOrigin<tower_h2::client::Connection<tokio::net::tcp::TcpStream, tokio::executor::DefaultExecutor, tower_grpc::BoxBody>>>>>,
   operations_client: Arc<bazel_protos::operations_grpc::OperationsClient>,
   store: Store,
   futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
@@ -72,35 +80,48 @@ impl CommandRunner {
   // behavior.
   fn oneshot_execute(
     &self,
-    execute_request: &Arc<bazel_protos::remote_execution::ExecuteRequest>,
+    execute_request: bazel_protos::tower_protos::build::bazel::remote::execution::v2::ExecuteRequest,
   ) -> BoxFuture<OperationOrStatus, String> {
-    let stream = try_future!(self
-      .execution_client
-      .execute_opt(&execute_request, self.call_option())
-      .map_err(rpcerror_to_string));
-    stream
-      .take(1)
-      .into_future()
-      // If there was a response, drop the _stream to disconnect so that the server doesn't keep
-      // the connection alive and continue sending on it.
-      .map(|(maybe_operation, stream)| {
-        drop(stream);
-        maybe_operation
-      })
-      // If there was an error, drop the _stream to disconnect so that the server doesn't keep the
-      // connection alive and continue sending on it.
-      .map_err(|(error, stream)| {
-        drop(stream);
-        error
-      })
-      .then(|maybe_operation_result| match maybe_operation_result {
-        Ok(Some(operation)) => Ok(OperationOrStatus::Operation(operation)),
-        Ok(None) => {
-          Err("Didn't get proper stream response from server during remote execution".to_owned())
-        }
-        Err(err) => rpcerror_to_status_or_string(err).map(OperationOrStatus::Status),
-      })
-      .to_boxed()
+//    let stream = try_future!(self
+//      .execution_client
+//      .execute_opt(&execute_request, self.call_option())
+//      .map_err(rpcerror_to_string));
+//    stream
+//      .take(1)
+//      .into_future()
+//      // If there was a response, drop the _stream to disconnect so that the server doesn't keep
+//      // the connection alive and continue sending on it.
+//      .map(|(maybe_operation, stream)| {
+//        drop(stream);
+//        maybe_operation
+//      })
+//      // If there was an error, drop the _stream to disconnect so that the server doesn't keep the
+//      // connection alive and continue sending on it.
+//      .map_err(|(error, stream)| {
+//        drop(stream);
+//        error
+//      })
+//      .then(|maybe_operation_result| match maybe_operation_result {
+//        Ok(Some(operation)) => Ok(OperationOrStatus::Operation(operation)),
+//        Ok(None) => {
+//          Err("Didn't get proper stream response from server during remote execution".to_owned())
+//        }
+//        Err(err) => rpcerror_to_status_or_string(err).map(OperationOrStatus::Status),
+//      })
+//      .to_boxed()
+
+    let mut conn = self.conn.lock().unwrap();
+     conn.execute(Request::new(execute_request))
+        .map_err(|err| format!("DWH1: Err: {:?}", err))
+        .and_then(|response_stream| {
+          response_stream.into_inner().take(1).into_future()
+              .map(|(resp, stream)| {
+                std::mem::drop(stream);
+                resp.unwrap()
+              })
+              .map_err(|err| format!("DWH2: Err: {:?}", err))
+              .map(|operation| OperationOrStatus::Operation(operation.into()))
+        }).to_boxed()
   }
 }
 
@@ -145,7 +166,6 @@ impl super::CommandRunner for CommandRunner {
         let command_runner = self.clone();
         let command_runner2 = self.clone();
         let command_runner3 = self.clone();
-        let execute_request = Arc::new(execute_request);
         let execute_request2 = execute_request.clone();
         let futures_timer_thread = self.futures_timer_thread.clone();
 
@@ -166,7 +186,7 @@ impl super::CommandRunner for CommandRunner {
               command
             );
             command_runner
-              .oneshot_execute(&execute_request)
+              .oneshot_execute(execute_request)
               .join(future::ok(history))
           })
           .and_then(move |(operation, history)| {
@@ -212,7 +232,7 @@ impl super::CommandRunner for CommandRunner {
                           let mut history = history;
                           history.current_attempt += summary;
                           command_runner2
-                            .oneshot_execute(&execute_request)
+                            .oneshot_execute(execute_request)
                             .join(future::ok(history))
                         })
                         // Reset `iter_num` on `MissingDigests`
@@ -330,18 +350,41 @@ impl CommandRunner {
       channel.clone(),
     ));
 
-    let r = CommandRunner {
-      cache_key_gen_version,
-      instance_name,
-      authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
-      channel,
-      env,
-      execution_client,
-      operations_client,
-      store,
-      futures_timer_thread,
-    };
-    futures::future::ok(r)
+    struct Dst(String);
+
+    impl tokio_connect::Connect for Dst {
+      type Connected = TcpStream;
+      type Error = ::std::io::Error;
+      type Future = ConnectFuture;
+
+      fn connect(&self) -> Self::Future {
+        TcpStream::connect(&self.0.to_socket_addrs().unwrap().next().unwrap())
+      }
+    }
+
+    let uri: http::Uri = format!("http://{}", address).parse().unwrap();
+    client::Connect::new(Dst(address.to_owned()), Default::default(), DefaultExecutor::current()).make_service(())
+        .map(move |conn| {
+          let conn = tower_http::add_origin::Builder::new()
+              .uri(uri)
+              .build(conn)
+              .unwrap();
+          let conn = bazel_protos::tower_protos::build::bazel::remote::execution::v2::client::Execution::new(conn);
+          let conn = Arc::new(Mutex::new(conn));
+          CommandRunner {
+            cache_key_gen_version,
+            instance_name,
+            authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
+            channel,
+            env,
+            execution_client,
+            operations_client,
+            conn,
+            store,
+            futures_timer_thread,
+          }
+        })
+        .map_err(|err| format!("Error connecting: {}", err))
   }
 
   fn call_option(&self) -> grpcio::CallOption {
@@ -739,7 +782,7 @@ fn make_execute_request(
   (
     bazel_protos::remote_execution::Action,
     bazel_protos::remote_execution::Command,
-    bazel_protos::remote_execution::ExecuteRequest,
+    bazel_protos::tower_protos::build::bazel::remote::execution::v2::ExecuteRequest,
   ),
   String,
 > {
@@ -808,11 +851,13 @@ fn make_execute_request(
   action.set_command_digest((&digest(&command)?).into());
   action.set_input_root_digest((&req.input_files).into());
 
-  let mut execute_request = bazel_protos::remote_execution::ExecuteRequest::new();
-  if let Some(instance_name) = instance_name {
-    execute_request.set_instance_name(instance_name.clone());
-  }
-  execute_request.set_action_digest((&digest(&action)?).into());
+  let execute_request = bazel_protos::tower_protos::build::bazel::remote::execution::v2::ExecuteRequest {
+    action_digest: Some((&digest(&action)?).into()),
+    skip_cache_lookup: false,
+    instance_name: instance_name.clone().unwrap_or_default(),
+    execution_policy: None,
+    results_cache_policy: None,
+  };
 
   Ok((action, command, execute_request))
 }

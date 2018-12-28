@@ -26,6 +26,30 @@ impl<'a> From<&'a super::remote_execution::Digest> for Result<hashing::Digest, S
   }
 }
 
+impl From<crate::tower_protos::google::longrunning::Operation> for crate::operations::Operation {
+  fn from(op: crate::tower_protos::google::longrunning::Operation) -> Self {
+    let mut dst = Self::new();
+    dst.set_name(op.name);
+    dst.set_metadata(prost_any_to_gcprio_any(op.metadata.unwrap()));
+    dst.set_done(op.done);
+    match op.result {
+      Some(crate::tower_protos::google::longrunning::operation::Result::Response(response)) => {
+        dst.set_response(prost_any_to_gcprio_any(response))
+      },
+      _ => unimplemented!(),
+    };
+    dst
+  }
+}
+
+pub fn prost_any_to_gcprio_any(any: prost_types::Any) -> protobuf::well_known_types::Any {
+  let prost_types::Any { type_url, value } = any;
+  let mut dst = protobuf::well_known_types::Any::new();
+  dst.set_type_url(type_url);
+  dst.set_value(value);
+  dst
+}
+
 #[cfg(test)]
 mod tests {
   use hashing;
