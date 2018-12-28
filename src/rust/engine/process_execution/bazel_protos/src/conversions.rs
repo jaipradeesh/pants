@@ -36,7 +36,10 @@ impl From<crate::tower_protos::google::longrunning::Operation> for crate::operat
       Some(crate::tower_protos::google::longrunning::operation::Result::Response(response)) => {
         dst.set_response(prost_any_to_gcprio_any(response))
       },
-      _ => unimplemented!(),
+      Some(crate::tower_protos::google::longrunning::operation::Result::Error(status)) => {
+        dst.set_error(prost_status_to_gcprio_status(status))
+      },
+      None => {},
     };
     dst
   }
@@ -47,6 +50,15 @@ pub fn prost_any_to_gcprio_any(any: prost_types::Any) -> protobuf::well_known_ty
   let mut dst = protobuf::well_known_types::Any::new();
   dst.set_type_url(type_url);
   dst.set_value(value);
+  dst
+}
+
+pub fn prost_status_to_gcprio_status(status: crate::tower_protos::google::rpc::Status) -> crate::status::Status {
+  let crate::tower_protos::google::rpc::Status { code, message, details } = status;
+  let mut dst = crate::status::Status::new();
+  dst.set_code(code);
+  dst.set_message(message);
+  dst.set_details(details.into_iter().map(prost_any_to_gcprio_any).collect::<Vec<_>>().into());
   dst
 }
 

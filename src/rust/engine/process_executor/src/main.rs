@@ -31,6 +31,7 @@ use process_execution;
 use clap::{value_t, App, AppSettings, Arg};
 use futures::future::Future;
 use hashing::{Digest, Fingerprint};
+use process_execution::CommandRunner;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::Iterator;
 use std::path::PathBuf;
@@ -184,8 +185,12 @@ fn main() {
     .unwrap_or_else(fs::Store::default_path);
   let pool = Arc::new(fs::ResettablePool::new("process-executor-".to_owned()));
   let timer_thread = resettable::Resettable::new(|| futures_timer::HelperThread::new().unwrap());
-  let server_arg = args.value_of("server");
+  let server_arg = args.value_of("server").clone();
+  let server_address = args.value_of("server").unwrap().to_owned();
   let remote_instance_arg = args.value_of("remote-instance-name").map(str::to_owned);
+
+  let rt = tokio::runtime::Runtime::new().unwrap();
+
   let store = match (server_arg, args.value_of("cas-server")) {
     (Some(_server), Some(cas_server)) => {
       let chunk_size =
@@ -246,7 +251,7 @@ fn main() {
     jdk_home: args.value_of("jdk").map(PathBuf::from),
   };
 
-  let runner: Box<dyn process_execution::CommandRunner> = match server_arg {
+  match server_arg {
     Some(address) => {
       let root_ca_certs = if let Some(path) = args.value_of("execution-root-ca-cert-file") {
         Some(std::fs::read(path).expect("Error reading root CA certs file"))
@@ -261,25 +266,32 @@ fn main() {
           None
         };
 
-      Box::new(process_execution::remote::CommandRunner::new(
-        address,
-        args.value_of("cache-key-gen-version").map(str::to_owned),
+      let executor = rt.executor().clone();
+      let cache_key_gen_version = args.value_of("cache-key-gen-version").map(str::to_owned);
+      let timer_thread = timer_thread.clone();
+      rt.executor().spawn(futures::future::lazy(move || {process_execution::remote::CommandRunner::new(
+        &server_address,
+        cache_key_gen_version,
         remote_instance_arg,
         root_ca_certs,
         oauth_bearer_token,
         1,
         store,
         timer_thread,
-      ))
+        executor,
+      ).and_then(|runner| runner.run(request)).map(|result| {
+      print!("{}", String::from_utf8(result.stdout.to_vec()).unwrap());
+      eprint!("{}", String::from_utf8(result.stderr.to_vec()).unwrap());
+      // TODO: Work out what threadpool keeps the process alive without this
+//      exit(result.exit_code);
+      }).map_err(|err| eprintln!("Error: {}", err))}));
     }
-    None => Box::new(process_execution::local::CommandRunner::new(
-      store, pool, work_dir, true,
-    )),
+    None => unimplemented!(),
   };
 
-  let result = runner.run(request).wait().expect("Error executing");
-
-  print!("{}", String::from_utf8(result.stdout.to_vec()).unwrap());
-  eprint!("{}", String::from_utf8(result.stderr.to_vec()).unwrap());
-  exit(result.exit_code);
+  println!("DWH: Shutting down");
+  rt.shutdown_on_idle().wait().unwrap();
+  println!("DWH: Did shutdown on idle");
+  timer_thread.with(|t| std::mem::drop(t));
+  println!("DWH: Did drop timer thread");
 }

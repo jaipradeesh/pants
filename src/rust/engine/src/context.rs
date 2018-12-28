@@ -101,6 +101,7 @@ impl Core {
     let fs_pool2 = fs_pool.clone();
     let futures_timer_thread = Resettable::new(|| futures_timer::HelperThread::new().unwrap());
     let futures_timer_thread2 = futures_timer_thread.clone();
+    let runtime2 = runtime.clone();
     let store_and_command_runner_and_http_client = Resettable::new(move || {
       let local_store_dir = local_store_dir.clone();
       let store = safe_create_dir_all_ioerror(&local_store_dir)
@@ -140,6 +141,7 @@ impl Core {
           process_execution_parallelism + 2,
           store.clone(),
           futures_timer_thread2.clone(),
+          runtime2.with(|runtime| runtime.executor()),
         ).map(|r| Box::new(r) as Box<dyn CommandRunner>).to_boxed(),
         None => futures::future::ok(Box::new(process_execution::local::CommandRunner::new(
           store.clone(),

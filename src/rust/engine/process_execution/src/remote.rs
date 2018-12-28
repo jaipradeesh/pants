@@ -40,7 +40,6 @@ enum OperationOrStatus {
   Status(bazel_protos::status::Status),
 }
 
-#[derive(Clone)]
 pub struct CommandRunner {
   cache_key_gen_version: Option<String>,
   instance_name: Option<String>,
@@ -48,7 +47,7 @@ pub struct CommandRunner {
   channel: grpcio::Channel,
   env: Arc<grpcio::Environment>,
   execution_client: Arc<bazel_protos::remote_execution_grpc::ExecutionClient>,
-  conn: Arc<Mutex<bazel_protos::tower_protos::build::bazel::remote::execution::v2::client::Execution<tower_http::add_origin::AddOrigin<tower_h2::client::Connection<tokio::net::tcp::TcpStream, tokio::executor::DefaultExecutor, tower_grpc::BoxBody>>>>>,
+  conn: Arc<Mutex<bazel_protos::tower_protos::build::bazel::remote::execution::v2::client::Execution<tower_http::add_origin::AddOrigin<tower_h2::client::Connection<tokio::net::tcp::TcpStream, tokio::runtime::TaskExecutor, tower_grpc::BoxBody>>>>>,
   operations_client: Arc<bazel_protos::operations_grpc::OperationsClient>,
   store: Store,
   futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
@@ -68,6 +67,30 @@ enum ExecutionError {
 struct ExecutionHistory {
   attempts: Vec<ExecutionStats>,
   current_attempt: ExecutionStats,
+}
+
+impl Clone for CommandRunner {
+  fn clone(&self) -> Self {
+    println!("DWH: Cloning CommandRunner");
+    CommandRunner {
+      cache_key_gen_version: self.cache_key_gen_version.clone(),
+      instance_name: self.instance_name.clone(),
+      authorization_header: self.authorization_header.clone(),
+      channel: self.channel.clone(),
+      env: self.env.clone(),
+      execution_client: self.execution_client.clone(),
+      conn: self.conn.clone(),
+      operations_client: self.operations_client.clone(),
+      store: self.store.clone(),
+      futures_timer_thread: self.futures_timer_thread.clone(),
+    }
+  }
+}
+
+impl Drop for CommandRunner {
+  fn drop(&mut self) {
+    println!("DWH: Dropping CommandRunner");
+  }
 }
 
 impl CommandRunner {
@@ -120,7 +143,9 @@ impl CommandRunner {
                 resp.unwrap()
               })
               .map_err(|err| format!("DWH2: Err: {:?}", err))
-              .map(|operation| OperationOrStatus::Operation(operation.into()))
+              .map(|operation| {
+                OperationOrStatus::Operation(operation.into())
+              })
         }).to_boxed()
   }
 }
@@ -327,6 +352,7 @@ impl CommandRunner {
     thread_count: usize,
     store: Store,
     futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
+    executor: tokio::runtime::TaskExecutor,
   ) -> impl Future<Item=Self, Error=String> {
     let env = Arc::new(grpcio::Environment::new(thread_count));
     let channel = {
@@ -363,7 +389,7 @@ impl CommandRunner {
     }
 
     let uri: http::Uri = format!("http://{}", address).parse().unwrap();
-    client::Connect::new(Dst(address.to_owned()), Default::default(), DefaultExecutor::current()).make_service(())
+    client::Connect::new(Dst(address.to_owned()), Default::default(), executor).make_service(())
         .map(move |conn| {
           let conn = tower_http::add_origin::Builder::new()
               .uri(uri)

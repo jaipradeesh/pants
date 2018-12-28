@@ -1344,6 +1344,7 @@ dependencies = [
  "hashing 0.0.1",
  "process_execution 0.0.1",
  "resettable 0.0.1",
+ "tokio 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
