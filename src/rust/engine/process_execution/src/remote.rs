@@ -307,7 +307,7 @@ impl CommandRunner {
     thread_count: usize,
     store: Store,
     futures_timer_thread: resettable::Resettable<futures_timer::HelperThread>,
-  ) -> CommandRunner {
+  ) -> impl Future<Item=Self, Error=String> {
     let env = Arc::new(grpcio::Environment::new(thread_count));
     let channel = {
       let builder = grpcio::ChannelBuilder::new(env.clone());
@@ -330,7 +330,7 @@ impl CommandRunner {
       channel.clone(),
     ));
 
-    CommandRunner {
+    let r = CommandRunner {
       cache_key_gen_version,
       instance_name,
       authorization_header: oauth_bearer_token.map(|t| format!("Bearer {}", t)),
@@ -340,7 +340,8 @@ impl CommandRunner {
       operations_client,
       store,
       futures_timer_thread,
-    }
+    };
+    futures::future::ok(r)
   }
 
   fn call_option(&self) -> grpcio::CallOption {

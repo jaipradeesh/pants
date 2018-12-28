@@ -129,8 +129,8 @@ impl Core {
         })
         .unwrap_or_else(|e| panic!("Could not initialize Store: {:?}", e));
 
-      let underlying_command_runner: Box<dyn CommandRunner> = match &remote_execution_server {
-        Some(ref address) => Box::new(process_execution::remote::CommandRunner::new(
+      let underlying_command_runner = match &remote_execution_server {
+        Some(ref address) => process_execution::remote::CommandRunner::new(
           address,
           remote_execution_process_cache_namespace.clone(),
           remote_instance_name.clone(),
@@ -140,17 +140,17 @@ impl Core {
           process_execution_parallelism + 2,
           store.clone(),
           futures_timer_thread2.clone(),
-        )),
-        None => Box::new(process_execution::local::CommandRunner::new(
+        ).map(|r| Box::new(r) as Box<dyn CommandRunner>).to_boxed(),
+        None => futures::future::ok(Box::new(process_execution::local::CommandRunner::new(
           store.clone(),
           fs_pool2.clone(),
           work_dir.clone(),
           process_execution_cleanup_local_dirs,
-        )),
+        )) as Box<dyn CommandRunner>).to_boxed(),
       };
 
-      let command_runner =
-        futures::future::ok(BoundedCommandRunner::new(underlying_command_runner, process_execution_parallelism)).to_boxed().shared();
+      let process_execution_parallelism = process_execution_parallelism;
+      let command_runner = underlying_command_runner.map(move |r| BoundedCommandRunner::new(r, process_execution_parallelism)).to_boxed().shared();
 
       let http_client = reqwest::r#async::Client::new();
 
