@@ -43,7 +43,7 @@ pub struct Core {
   pub runtime: Resettable<Arc<Runtime>>,
   pub futures_timer_thread: Resettable<futures_timer::HelperThread>,
   store_and_command_runner_and_http_client:
-    Resettable<(Store, BoundedCommandRunner, reqwest::r#async::Client)>,
+    Resettable<(Store, futures::future::Shared<BoxFuture<BoundedCommandRunner, String>>, reqwest::r#async::Client)>,
   pub vfs: PosixFS,
 }
 
@@ -150,7 +150,7 @@ impl Core {
       };
 
       let command_runner =
-        BoundedCommandRunner::new(underlying_command_runner, process_execution_parallelism);
+        futures::future::ok(BoundedCommandRunner::new(underlying_command_runner, process_execution_parallelism)).to_boxed().shared();
 
       let http_client = reqwest::r#async::Client::new();
 
@@ -213,7 +213,7 @@ impl Core {
     self.store_and_command_runner_and_http_client.get().0
   }
 
-  pub fn command_runner(&self) -> BoundedCommandRunner {
+  pub fn command_runner(&self) -> futures::future::Shared<BoxFuture<BoundedCommandRunner, String>> {
     self.store_and_command_runner_and_http_client.get().1
   }
 

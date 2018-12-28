@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -379,8 +380,8 @@ impl WrappedNode for ExecuteProcess {
 
     context
       .core
-      .command_runner()
-      .run(request)
+      .command_runner().map_err(|e| e.deref().clone())
+      .and_then(|r| r.run(request))
       .map(ProcessResult)
       .map_err(|e| throw(&format!("Failed to execute process: {}", e)))
       .to_boxed()
