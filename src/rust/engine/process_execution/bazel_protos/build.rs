@@ -1,6 +1,5 @@
 use protoc_grpcio;
 
-use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -80,7 +79,11 @@ fn generate_for_grpcio(thirdpartyprotobuf: &Path) {
   )
       .expect("Failed to compile protos!");
 
-  let listing = gen_dir.read_dir().unwrap();
+  generate_mod_rs(&gen_dir).expect("Failed to generate mod.rs");
+}
+
+fn generate_mod_rs(dir: &Path) -> Result<(), String> {
+  let listing = dir.read_dir().unwrap();
   let mut pub_mod_stmts = listing
       .filter_map(|d| {
         let dirent = d.unwrap();
@@ -100,9 +103,7 @@ fn generate_for_grpcio(thirdpartyprotobuf: &Path) {
     pub_mod_stmts.join("\n")
   );
 
-  File::create(gen_dir.join("mod.rs"))
-      .and_then(|mut f| f.write_all(contents.as_bytes()))
-      .expect("Failed to write mod.rs")
+  std::fs::write(dir.join("mod.rs"), contents).map_err(|err| format!("Failed to write mod.rs: {}", err))
 }
 
 fn generate_for_tower(merged_root: PathBuf) {
@@ -117,7 +118,7 @@ fn generate_for_tower(merged_root: PathBuf) {
         &[merged_root],
       ).unwrap_or_else(|e| panic!("protobuf compilation failed: {}", e));
 
-  let out_dir = PathBuf::from("src/gen2/tower");
+  let out_dir = PathBuf::from("src/gen_for_tower");
   if out_dir.exists() {
     std::fs::remove_dir_all(&out_dir).unwrap();
   }
@@ -165,6 +166,8 @@ fn generate_for_tower(merged_root: PathBuf) {
       std::fs::write(dst, contents.join("\n")).unwrap();
     }
   }
+
+  generate_mod_rs(&out_dir).expect("Failed to write mod.rs");
 }
 
 fn make_merged_dir(thirdpartyprotobuf: &Path) -> tempfile::TempDir {

@@ -7,8 +7,8 @@ use protobuf;
 mod gen;
 pub use crate::gen::*;
 
-mod gen2;
-pub use crate::gen2::*;
+pub mod gen_for_tower;
+pub use crate::gen_for_tower as tower_protos;
 
 mod conversions;
 mod verification;
