@@ -1,0 +1,22 @@
+[package]
+name = "pantsbuild-s3-publisher"
+version = "0.1.0"
+authors = [ "Pants Build <pantsbuild@gmail.com>" ]
+edition = "2018"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+env_logger = "0.6"
+futures = "*"
+lambda_runtime = { git = "https://github.com/illicitonion/aws-lambda-rust-runtime.git", rev = "0f253c6e3036ed7027ba67f2e95a22a5e3362643" }
+log = "0.4"
+rusoto_core = { version = "0.36", default_features = false, features = ["rustls"] }
+rusoto_s3 = { version = "0.36", default_features = false, features = ["rustls"] }
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+tokio = "0.1.13"
+zip = "0.5"
