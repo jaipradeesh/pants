@@ -24,6 +24,7 @@ from pants.backend.jvm.targets.annotation_processor import AnnotationProcessor
 from pants.backend.jvm.targets.javac_plugin import JavacPlugin
 from pants.backend.jvm.targets.jvm_target import JvmTarget
 from pants.backend.jvm.targets.scalac_plugin import ScalacPlugin
+from pants.backend.jvm.tasks.classpath_entry import ClasspathEntry
 from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
 from pants.backend.jvm.tasks.jvm_compile.jvm_compile import JvmCompile
 from pants.base.build_environment import get_buildroot
@@ -387,6 +388,8 @@ class BaseZincCompile(JvmCompile):
         fp.write(arg)
         fp.write(b'\n')
 
+    classpath_entry_path = ctx.jar_file.path if self.get_options().use_classpath_jars else ctx.classes_dir.path
+
     if self.execution_strategy == self.HERMETIC:
       zinc_relpath = fast_relpath(self._zinc.zinc, get_buildroot())
 
@@ -422,6 +425,8 @@ class BaseZincCompile(JvmCompile):
         argv=argv,
         input_files=merged_input_digest,
         output_directories=(classes_dir,),
+        # TODO:
+        # output_files=(jar_path,),
         description="zinc compile for {}".format(ctx.target.address.spec),
         # TODO: These should always be unicodes
         # Since this is always hermetic, we need to use `underlying_dist`
@@ -434,8 +439,7 @@ class BaseZincCompile(JvmCompile):
         DirectoryToMaterialize(get_buildroot(), res.output_directory_digest),
       ))
 
-      # TODO: This should probably return a ClasspathEntry rather than a Digest
-      return res.output_directory_digest
+      return ClasspathEntry(classpath_entry_path, res.output_directory_digest)
     else:
       if self.runjava(classpath=[self._zinc.zinc],
                       main=Zinc.ZINC_COMPILE_MAIN,
@@ -445,6 +449,7 @@ class BaseZincCompile(JvmCompile):
                       workunit_labels=[WorkUnitLabel.COMPILER],
                       dist=self._zinc.dist):
         raise TaskError('Zinc compile failed.')
+      return ClasspathEntry(classpath_entry_path)
 
   def _verify_zinc_classpath(self, classpath, allow_dist=True):
     def is_outside(path, putative_parent):

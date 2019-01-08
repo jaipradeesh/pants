@@ -500,7 +500,7 @@ class JvmCompile(CompilerOptionSetsMixin, NailgunTaskBase):
         ').')
       with self.context.new_workunit('compile', labels=[WorkUnitLabel.COMPILER]) as compile_workunit:
         try:
-          directory_digest = self.compile(
+          classpath_entry = self.compile(
             ctx,
             self._args,
             dependency_classpath,
@@ -512,7 +512,7 @@ class JvmCompile(CompilerOptionSetsMixin, NailgunTaskBase):
             self._get_plugin_map('scalac', ScalaPlatform.global_instance(), ctx.target),
           )
           self._capture_logs(compile_workunit, ctx.log_dir)
-          return directory_digest
+          return classpath_entry
         except TaskError:
           if self.get_options().suggest_missing_deps:
             logs = [path
@@ -852,17 +852,21 @@ class JvmCompile(CompilerOptionSetsMixin, NailgunTaskBase):
       compiler_option_sets = dep_context.defaulted_property(tgt, lambda x: x.compiler_option_sets)
       zinc_file_manager = dep_context.defaulted_property(tgt, lambda x: x.zinc_file_manager)
       with Timer() as timer:
-        directory_digest = self._compile_vts(vts,
-                          ctx,
-                          upstream_analysis,
-                          dependency_cp_entries,
-                          progress_message,
-                          tgt.platform,
-                          compiler_option_sets,
-                          zinc_file_manager,
-                          counter)
+        classpath_entry = self._compile_vts(
+          vts,
+          ctx,
+          upstream_analysis,
+          dependency_cp_entries,
+          progress_message,
+          tgt.platform,
+          compiler_option_sets,
+          zinc_file_manager,
+          counter)
 
-      ctx.classes_dir = ClasspathEntry(ctx.classes_dir.path, directory_digest)
+      if self.get_options().use_classpath_jars:
+        ctx.jar_file = classpath_entry
+      else:
+        ctx.classes_dir = classpath_entry
 
       self._record_target_stats(tgt,
                                 len(dependency_cp_entries),

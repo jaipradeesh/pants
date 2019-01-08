@@ -16,6 +16,7 @@ from pants.backend.jvm.subsystems.jvm_platform import JvmPlatform
 from pants.backend.jvm.targets.annotation_processor import AnnotationProcessor
 from pants.backend.jvm.targets.javac_plugin import JavacPlugin
 from pants.backend.jvm.targets.jvm_target import JvmTarget
+from pants.backend.jvm.tasks.classpath_entry import ClasspathEntry
 from pants.backend.jvm.tasks.jvm_compile.jvm_compile import JvmCompile
 from pants.base.exceptions import TaskError
 from pants.base.workunit import WorkUnit, WorkUnitLabel
@@ -188,6 +189,7 @@ class JavacCompile(JvmCompile):
           workunit.set_outcome(WorkUnit.FAILURE if return_code else WorkUnit.SUCCESS)
           if return_code:
             raise TaskError('javac exited with return code {rc}'.format(rc=return_code))
+    return ClasspathEntry(ctx.jar_file.path if self.get_options().use_classpath_jars else ctx.classes_dir.path)
 
   @classmethod
   def _javac_plugin_args(cls, javac_plugin_map):
