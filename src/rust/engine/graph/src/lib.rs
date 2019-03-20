@@ -784,6 +784,7 @@ mod tests {
 
   use std::cmp;
   use std::collections::{HashMap, HashSet};
+  use std::path::Path;
   use std::sync::{mpsc, Arc};
   use std::thread;
   use std::time::Duration;
@@ -795,7 +796,9 @@ mod tests {
 
   use self::rand::Rng;
 
-  use super::{EntryId, Graph, InvalidationResult, Node, NodeContext, NodeError};
+  use super::{
+    Entry, EntryId, Graph, InvalidationResult, Node, NodeContext, NodeError, NodeVisualizer,
+  };
 
   #[test]
   fn create() {
@@ -888,7 +891,11 @@ mod tests {
     );
 
     // Request with a new context that truncates execution at the middle Node.
-    let context = TContext::new_with_stop_at(0, TNode(1), graph.clone());
+    let context = TContext::new_with_dependencies(
+      0,
+      vec![(TNode(1), None)].into_iter().collect(),
+      graph.clone(),
+    );
     assert_eq!(
       graph.create(TNode(2), &context).wait(),
       Ok(vec![T(1, 0), T(2, 0)])
@@ -1015,6 +1022,60 @@ mod tests {
     );
   }
 
+  #[test]
+  fn cyclic_failure() {
+    // Confirms that an attempt to create a cycle fails.
+    let graph = Arc::new(Graph::new());
+    let top = TNode(2);
+    let context = TContext::new_with_dependencies(
+      0,
+      // Request creation of a cycle by sending the bottom most node to the top.
+      vec![(TNode(0), Some(top))].into_iter().collect(),
+      graph.clone(),
+    );
+
+    assert_eq!(graph.create(TNode(2), &context).wait(), Err(TError::Cyclic));
+  }
+
+  #[test]
+  fn cyclic_dirtying() {
+    // Confirms that a dirtied path between two nodes is able to reverse direction while being
+    // cleaned.
+    let graph = Arc::new(Graph::new());
+    let initial_top = TNode(2);
+    let initial_bot = TNode(0);
+
+    // Request with a context that creates a path downward.
+    let context_down = TContext::new(0, graph.clone());
+    assert_eq!(
+      graph.create(initial_top, &context_down).wait(),
+      Ok(vec![T(0, 0), T(1, 0), T(2, 0)])
+    );
+
+    // Clear the bottom node, and then clean it with a context that causes the path to reverse.
+    graph.invalidate_from_roots(|n| n == &initial_bot);
+    let context_up = TContext::new_with_dependencies(
+      1,
+      // Reverse the path from bottom to top.
+      vec![(TNode(1), None), (TNode(0), Some(TNode(1)))]
+        .into_iter()
+        .collect(),
+      graph.clone(),
+    );
+
+    let res = graph.create(initial_bot, &context_up);
+    thread::sleep(Duration::from_millis(100));
+    graph
+      .visualize(
+        EmptyVisualizer,
+        &[TNode(2), TNode(1), TNode(0)],
+        Path::new("/Users/stuhood/src/pants/dest.dot"),
+      )
+      .unwrap();
+
+    assert_eq!(res.wait(), Ok(vec![T(2, 1), T(1, 1), T(0, 1)]));
+  }
+
   ///
   /// A token containing the id of a Node and the id of a Context, respectively. Has a short name
   /// to minimize the verbosity of tests.
@@ -1035,12 +1096,11 @@ mod tests {
 
     fn run(self, context: TContext) -> BoxFuture<Vec<T>, TError> {
       context.ran(self.clone());
-      let depth = self.0;
-      let token = T(depth, context.id());
-      if depth > 0 && !context.stop_at(&self) {
+      let token = T(self.0, context.id());
+      if let Some(dep) = context.dependency_of(&self) {
         context.maybe_delay(&self);
         context
-          .get(TNode(depth - 1))
+          .get(dep)
           .map(move |mut v| {
             v.push(token);
             v
@@ -1119,7 +1179,11 @@ mod tests {
   #[derive(Clone)]
   struct TContext {
     id: usize,
-    stop_at: Option<TNode>,
+    // A mapping from source to optional destination that drives what values each TNode depends on.
+    // If there is no entry in this map for a node, then TNode::run will default to requesting
+    // the next smallest node. Finally, if a None entry is present, a node will have no
+    // dependencies.
+    edges: Arc<HashMap<TNode, Option<TNode>>>,
     delays: HashMap<TNode, Duration>,
     graph: Arc<Graph<TNode>>,
     runs: Arc<Mutex<Vec<TNode>>>,
@@ -1130,7 +1194,7 @@ mod tests {
     fn clone_for(&self, entry_id: EntryId) -> TContext {
       TContext {
         id: self.id,
-        stop_at: self.stop_at.clone(),
+        edges: self.edges.clone(),
         delays: self.delays.clone(),
         graph: self.graph.clone(),
         runs: self.runs.clone(),
@@ -1157,7 +1221,7 @@ mod tests {
     fn new(id: usize, graph: Arc<Graph<TNode>>) -> TContext {
       TContext {
         id,
-        stop_at: None,
+        edges: Arc::default(),
         delays: HashMap::default(),
         graph,
         runs: Arc::new(Mutex::new(Vec::new())),
@@ -1165,10 +1229,14 @@ mod tests {
       }
     }
 
-    fn new_with_stop_at(id: usize, stop_at: TNode, graph: Arc<Graph<TNode>>) -> TContext {
+    fn new_with_dependencies(
+      id: usize,
+      edges: HashMap<TNode, Option<TNode>>,
+      graph: Arc<Graph<TNode>>,
+    ) -> TContext {
       TContext {
         id,
-        stop_at: Some(stop_at),
+        edges: Arc::new(edges),
         delays: HashMap::default(),
         graph,
         runs: Arc::new(Mutex::new(Vec::new())),
@@ -1183,7 +1251,7 @@ mod tests {
     ) -> TContext {
       TContext {
         id,
-        stop_at: None,
+        edges: Arc::default(),
         delays,
         graph,
         runs: Arc::new(Mutex::new(Vec::new())),
@@ -1210,8 +1278,16 @@ mod tests {
       }
     }
 
-    fn stop_at(&self, node: &TNode) -> bool {
-      Some(node) == self.stop_at.as_ref()
+    ///
+    /// If the given TNode should declare a dependency on another TNode, returns that dependency.
+    ///
+    fn dependency_of(&self, node: &TNode) -> Option<TNode> {
+      match self.edges.get(node) {
+        Some(Some(ref dep)) => Some(dep.clone()),
+        Some(None) => None,
+        None if node.0 > 0 => Some(TNode(node.0 - 1)),
+        None => None,
+      }
     }
 
     fn runs(&self) -> Vec<TNode> {
@@ -1231,6 +1307,18 @@ mod tests {
 
     fn cyclic() -> Self {
       TError::Cyclic
+    }
+  }
+
+  struct EmptyVisualizer;
+
+  impl NodeVisualizer<TNode> for EmptyVisualizer {
+    fn color_scheme(&self) -> &str {
+      "set312"
+    }
+
+    fn color(&mut self, entry: &Entry<TNode>) -> String {
+      "white".to_owned()
     }
   }
 }
