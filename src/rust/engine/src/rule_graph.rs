@@ -674,38 +674,30 @@ impl<'t> GraphMaker<'t> {
     if satisfiable_entries.is_empty() {
       // No source of this dependency was satisfiable with these Params.
       return vec![];
+    } else if satisfiable_entries.len() == 1 {
+      return satisfiable_entries;
     }
 
-    // Prefer a Param, then the non-ambiguous rule with the smallest set of input Params.
-    // TODO: We should likely prefer Rules to Params.
-    if satisfiable_entries.len() == 1 {
-      satisfiable_entries
-    } else if let Some(param) = satisfiable_entries.iter().find(|e| match e {
-      &Entry::Param(_) => true,
-      _ => false,
-    }) {
-      vec![*param]
-    } else {
-      // We prefer the non-ambiguous rule with the smallest set of Params, as that minimizes Node
-      // identities in the graph and biases toward receiving values from dependencies (which do not
-      // affect our identity) rather than dependents.
-      let mut minimum_param_set_size = ::std::usize::MAX;
-      let mut rules = Vec::new();
-      for satisfiable_entry in satisfiable_entries {
-        if let &Entry::WithDeps(ref wd) = satisfiable_entry {
-          let param_set_size = wd.params().len();
-          if param_set_size < minimum_param_set_size {
-            rules.clear();
-            rules.push(satisfiable_entry);
-            minimum_param_set_size = param_set_size;
-          } else if param_set_size == minimum_param_set_size {
-            rules.push(satisfiable_entry);
-          }
-        }
+    // We prefer the non-ambiguous entry with the smallest set of Params, as that minimizes Node
+    // identities in the graph and biases toward receiving values from dependencies (which do not
+    // affect our identity) rather than dependents.
+    let mut minimum_param_set_size = ::std::usize::MAX;
+    let mut rules = Vec::new();
+    for satisfiable_entry in satisfiable_entries {
+      let param_set_size = match satisfiable_entry {
+        &Entry::WithDeps(ref wd) => wd.params().len(),
+        &Entry::Param(_) => 1,
+      };
+      if param_set_size < minimum_param_set_size {
+        rules.clear();
+        rules.push(satisfiable_entry);
+        minimum_param_set_size = param_set_size;
+      } else if param_set_size == minimum_param_set_size {
+        rules.push(satisfiable_entry);
       }
-
-      rules
     }
+
+    rules
   }
 
   fn powerset<'a, T: Clone>(slice: &'a [T]) -> impl Iterator<Item = Vec<T>> + 'a {
