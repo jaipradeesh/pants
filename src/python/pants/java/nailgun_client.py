@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from builtins import object, str
 
@@ -19,6 +20,7 @@ from future.utils import PY3
 from pants.java.nailgun_io import NailgunStreamWriter
 from pants.java.nailgun_protocol import ChunkType, NailgunProtocol
 from pants.util.dirutil import safe_file_dump
+from pants.util.objects import datatype
 from pants.util.osutil import safe_kill
 from pants.util.socket import RecvBufferedSocket
 from pants.util.strutil import ensure_binary, safe_shlex_join
@@ -115,7 +117,10 @@ class NailgunClientSession(NailgunProtocol, NailgunProtocol.TimeoutProvider):
     :raises: :class:`Exception` if the session completes before the timeout, the `reason` argument
                                 to .set_exit_timeout() will be raised."""
     try:
-      for chunk_type, payload in self.iter_chunks(self._sock, return_bytes=True,
+      # TODO: Work out what should actually be done here.
+      class Foo(datatype(("socket", "lock", "is_shutdown"))): pass
+      sock = Foo(self._sock, threading.Lock(), False)
+      for chunk_type, payload in self.iter_chunks(sock, return_bytes=True,
                                                   timeout_object=self):
         # TODO(#6579): assert that we have at this point received all the chunk types in
         # ChunkType.REQUEST_TYPES, then require PID and PGRP (exactly once?), and then allow any of

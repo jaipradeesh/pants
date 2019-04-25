@@ -69,29 +69,29 @@ class NailgunStreamStdinReader(_StoppableDaemonThread):
   Runs until the socket is closed.
   """
 
-  def __init__(self, sock, write_handle):
+  def __init__(self, maybe_shutdown_socket, write_handle):
     """
     :param socket sock: the socket to read nailgun protocol chunks from.
     :param file write_handle: A file-like (usually the write end of a pipe/pty) onto which
       to write data decoded from the chunks.
     """
     super(NailgunStreamStdinReader, self).__init__(name=self.__class__.__name__)
-    self._socket = sock
+    self._maybe_shutdown_socket = maybe_shutdown_socket
     self._write_handle = write_handle
 
   @classmethod
   @contextmanager
-  def open(cls, sock, isatty=False):
+  def open(cls, maybe_shutdown_socket, isatty=False):
     with _pipe(isatty) as (read_fd, write_fd):
-      reader = NailgunStreamStdinReader(sock, os.fdopen(os.dup(write_fd), 'wb'))
+      reader = NailgunStreamStdinReader(maybe_shutdown_socket, os.fdopen(os.dup(write_fd), 'wb'))
       with reader.running():
         # Instruct the thin client to begin reading and sending stdin.
-        NailgunProtocol.send_start_reading_input(sock)
+        NailgunProtocol.send_start_reading_input(maybe_shutdown_socket.socket)
         yield read_fd
 
   def run(self):
     try:
-      for chunk_type, payload in NailgunProtocol.iter_chunks(self._socket, return_bytes=True):
+      for chunk_type, payload in NailgunProtocol.iter_chunks(self._maybe_shutdown_socket, return_bytes=True):
         if self.is_stopped:
           return
 

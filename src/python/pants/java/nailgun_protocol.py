@@ -251,7 +251,7 @@ class NailgunProtocol(object):
       """
 
   @classmethod
-  def iter_chunks(cls, sock, return_bytes=False, timeout_object=None):
+  def iter_chunks(cls, maybe_shutdown_socket, return_bytes=False, timeout_object=None):
     """Generates chunks from a connected socket until an Exit chunk is sent or a timeout occurs.
 
     :param sock: the socket to read from.
@@ -282,11 +282,20 @@ class NailgunProtocol(object):
       else:
         remaining_time = None
 
-      with cls._set_socket_timeout(sock, timeout=remaining_time):
-        chunk_type, payload = cls.read_chunk(sock, return_bytes)
-        yield chunk_type, payload
-        if chunk_type == ChunkType.EXIT:
+      # TODO: Actually timeout if we've exceeded the passed in remaining_time.
+      remaining_time = 0.1
+
+      with maybe_shutdown_socket.lock:
+        if maybe_shutdown_socket.is_shutdown:
           break
+        with cls._set_socket_timeout(maybe_shutdown_socket.socket, timeout=remaining_time):
+          try:
+            chunk_type, payload = cls.read_chunk(maybe_shutdown_socket.socket, return_bytes)
+          except socket.timeout:
+            continue
+      yield chunk_type, payload
+      if chunk_type == ChunkType.EXIT:
+        break
 
   @classmethod
   def send_start_reading_input(cls, sock):
