@@ -4,7 +4,6 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-from pants.backend.python.rules.python_test_runner import PyTestResult
 from pants.base.exiter import PANTS_FAILED_EXIT_CODE, PANTS_SUCCEEDED_EXIT_CODE
 from pants.build_graph.address import Address
 from pants.engine.addressable import BuildFileAddresses
@@ -13,7 +12,7 @@ from pants.engine.goal import Goal
 from pants.engine.legacy.graph import HydratedTarget
 from pants.engine.rules import console_rule, rule
 from pants.engine.selectors import Get
-from pants.rules.core.core_test_model import Status, TestResult
+from pants.rules.core.core_test_model import Status, TestResult, TestTarget
 
 
 class Test(Goal):
@@ -53,14 +52,10 @@ def fast_test(console, addresses):
 
 @rule(TestResult, [HydratedTarget])
 def coordinator_of_tests(target):
-  # This should do an instance match, or canonicalise the adaptor type, or something
-  #if isinstance(target.adaptor, PythonTestsAdaptor):
-  # See https://github.com/pantsbuild/pants/issues/4535
-  if target.adaptor.type_alias == 'python_tests':
-    result = yield Get(PyTestResult, HydratedTarget, target)
-    yield TestResult(status=result.status, stdout=result.stdout)
-  else:
-    raise Exception("Didn't know how to run tests for type {}".format(target.adaptor.type_alias))
+  # NB: This has the effect of "casting" a TargetAdaptor to a member of the TestTarget union. If the
+  # TargetAdaptor is not a member of the union, it will fail at runtime with a useful error message.
+  result = yield Get(TestResult, TestTarget, target.adaptor)
+  yield result
 
 
 def rules():
